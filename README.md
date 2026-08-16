@@ -1,6 +1,6 @@
 # Grok2API & CPA 出口质量守护
 
-这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，同时提供零 Grok2API 运行时依赖的纯 CPA 原生插件。仓库不复制上游完整源码，只发布可审计的 Git patch、功能说明、AI 指南和 CPA 插件源码。
+这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，同时提供零 Grok2API 运行时依赖的纯 CPA 原生插件，以及当前生产在跑的 **Quality Guard sidecar**（管理页 `/quality-guard`）。仓库不复制上游完整源码。
 
 当前补丁基于：
 
@@ -24,6 +24,10 @@
 - 请求取消立即停止等待，不会取消共享探针。
 - 不重放已经提交的生成请求，也不把认证、额度或限流错误当作代理故障。
 - 官方已有的代理池模式继续按新隧道处理，单个旋转出口失败不会冷却整个池。
+
+### Sidecar（当前生产）
+
+`sidecar/quality_guard.py` 是和 Admin `/quality-guard` 配套的独立进程：被动审计 TPS、主动探针、隔离节点、可选换 sticky IP。说明见 [sidecar/README.md](./sidecar/README.md) 和 [sidecar/QUALITY_GUARD.md](./sidecar/QUALITY_GUARD.md)。不要提交 `quality-guard.env` 或 bootstrap。
 
 ### 出口质量守护
 
