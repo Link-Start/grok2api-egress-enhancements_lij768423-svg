@@ -282,6 +282,8 @@ speed = output_tokens * 1000 / generation_ms   # tokens/s
 
 恢复成功条件：quality_test → **healthy** → `set_enabled(true)`，清 `disabled_by_guard`。
 
+`missing_thinking` 不再按冷却时间直接放行：冷却结束后也必须先做质量探针。探针仍异常时，守护会保持节点隔离；若能从该探针的审计记录解析出账号，会临时禁用该账号让下一次探针换号，并在可轮换节点上继续换出口 IP 重测。只有探针正常才重新启用节点。
+
 失败：延长 `quarantined_until`，记 `quarantine_extended`。
 
 ### 6.4 受保护节点

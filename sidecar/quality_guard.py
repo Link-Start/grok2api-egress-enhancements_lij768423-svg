@@ -398,6 +398,23 @@ class ApiClient:
             query["cursor"] = cursor
         return self._request("GET", f"{INTERNAL_API_PREFIX}/request-audits?{urllib.parse.urlencode(query)}")
 
+    def find_audit_account_id(self, request_id: str) -> str:
+        """Resolve the account used by a just-finished quality probe."""
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return ""
+        page = self.list_audits()
+        for item in list(page.get("items") or []):
+            item_request_id = str(item.get("requestId") or "").strip()
+            item_id = str(item.get("id") or "").strip()
+            if request_id not in {item_request_id, item_id}:
+                continue
+            account_id = str(item.get("accountId") or "").strip()
+            if account_id.isdigit() and int(account_id) > 0:
+                return account_id
+            return ""
+        return ""
+
     def set_enabled(self, node_id: str, enabled: bool) -> int:
         result = self._request("PATCH", f"{INTERNAL_API_PREFIX}/egress-nodes/batch", {"ids": [node_id], "enabled": enabled})
         return int(result.get("updated") or 0)
@@ -854,6 +871,20 @@ class Guard:
         append_state_event(self.state, "account_force_switched", account_id=account_id, reason=reason, hold_seconds=hold_seconds)
         log_event("account_force_switched", account_id=account_id, reason=reason, hold_seconds=hold_seconds, updated=updated)
 
+    def _force_probe_account_switch(self, result: dict[str, Any], reason: str, now: float) -> None:
+        request_id = str(result.get("requestId") or "").strip()
+        if not request_id:
+            return
+        try:
+            account_id = self.api.find_audit_account_id(request_id)
+        except Exception as exc:
+            log_event("probe_account_lookup_failed", request_id=request_id, reason=reason, error_type=type(exc).__name__)
+            return
+        if not account_id:
+            log_event("probe_account_switch_skipped", request_id=request_id, reason=reason, error_type="account_not_found")
+            return
+        self._force_account_switch({"accountId": account_id}, reason, now)
+
     def _restore_forced_account_switches(self, now: float) -> None:
         accounts = self.state.get("degrade_accounts") or {}
         if not isinstance(accounts, dict):
@@ -1173,6 +1204,9 @@ class Guard:
             state["quarantined_until"] = now + self.config.quarantine_seconds
             state["last_reason"] = reason
             log_event("quarantine_extended", node_id=node_id, node_name=node.get("name"), reason=reason)
+            # A probe is a real routed request too. Remove the account that
+            # produced a degraded probe before selecting the next retry.
+            self._force_probe_account_switch(result, reason, now)
             if rotate_on_failure and self._should_rotate(node_id, reason):
                 self._recover_quarantined(node, time.time(), rotate=True)
             return
@@ -1246,9 +1280,10 @@ class Guard:
         if now < float(state.get("quarantined_until", 0.0)):
             return
         reason = str(state.get("last_reason") or "")
-        if reason == "missing_thinking":
-            self._restore_after_hold(node, now)
-            return
+        # Every quarantine, including missing_thinking, must pass an
+        # authoritative quality probe before the node is made schedulable.
+        # A failed recovery probe stays quarantined and _recover_quarantined
+        # rotates the sticky exit before retrying when the node is rotatable.
         passive = self._is_passive_quarantine(state)
         self._recover_quarantined(
             node,
