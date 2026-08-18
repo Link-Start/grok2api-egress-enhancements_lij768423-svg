@@ -1,5 +1,9 @@
 # 推荐出口部署方式
 
+**主路径是 Grok2API。** 别人装完要接近 lab：用户只贴全部家宽，AI 按 [AI_GROK2API_INSTALL.md](./AI_GROK2API_INSTALL.md) 把每条 sticky 开成独立节点并打开 Guard。
+
+「阶段 A：只接一条」是冒烟，**不是交付**。用户贴了 N 条就开 N 个节点。脚本：[`scripts/from_residential.py`](../scripts/from_residential.py)。
+
 本文给 `grok2api-egress-enhancements` 的使用者和 AI 工具一条可复用的落地路径：
 
 ```text
@@ -12,10 +16,10 @@ Mihomo 出口编排层
         ├─ 固定 sticky 会话 -> 独立监听器 -> 固定出口节点
         └─ Resin 动态池     -> 代理池监听器 -> 每连接/每隧道轮换
         ▼
-Grok2API 或 CPA 出口节点
+Grok2API 出口节点（主路径）
         │
         ├─ 账号按节点绑定
-        └─ Quality Guard / CPA Guard 观察、摘流、迁号、轮换、复测
+        └─ Quality Guard sidecar 观察、摘流、迁号、轮换、复测
 ```
 
 核心原则是：**Mihomo 负责把上游代理整理成可管理的出口，应用负责账号到出口的绑定，Guard 负责质量判定和故障动作。** 不要让应用直接混用原始代理用户名，也不要把固定 sticky 会话和动态 Resin 池塞进同一个固定节点。
@@ -110,9 +114,9 @@ Mihomo 的池策略只解决“下一条连接走哪里”，不负责判断 Gro
 - 手工 sticky 绑定和自动 rebalance 分开管理；
 - Guard 只迁移明确标记为 auto 的账号，不要把人工绑定当成可随意迁移的库存。
 
-### 3.2 CPA 原生插件
+### 3.2 CPA 原生插件（旁路，不是交付）
 
-CPA 使用相同的节点语义：
+默认不要装 CPA。只有用户明确只要 CPA 时才走插件。节点语义与 Grok2API 相同：
 
 - 固定住宅：节点类型 `fixed`，每个 session 单独建节点；
 - Resin 动态池：节点类型 `pool`，由 Mihomo 或供应商决定每连接轮换；
@@ -189,14 +193,15 @@ Quality Guard 不是 Mihomo controller，也不是代理商 API 的替代品：
 
 ## 6. 推荐上线顺序
 
-### 阶段 A：单节点验证
+给别人装的默认交付是 **B+C 一次做完**（家宽有几条就开几个节点，Guard 按 lab 默认打开）。阶段 A 只在用户只拿出 1 条、或你自己本机试连通时用。
 
-- 只接入一条 sticky 家宽或一个 Resin pool listener；
-- 记录多次连通检测和真实模型质量结果；
-- 确认应用容器能访问 listener，且没有把容器内回环地址误填给另一容器；
-- 先不启用自动换 IP 和自动 rebalance。
+### 阶段 A：单节点冒烟（不是交付）
 
-### 阶段 B：拆分故障域
+- 只用来确认「这一条 sticky 能出网、容器能打到 listener」；
+- 测完立刻把用户贴的其余 session 全部建成独立 listener/node；
+- 不要在只有 `res-01` 的时候告诉用户装完了。
+
+### 阶段 B：拆分故障域（用户贴了 N 条就必须做到）
 
 - 每个 sticky session 建一个独立 listener/node；
 - Resin 按 provider/地区/认证策略拆成独立池；

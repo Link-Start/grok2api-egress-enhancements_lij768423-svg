@@ -1,6 +1,29 @@
-# Grok2API & CPA egress quality guard
+# Grok2API egress quality guard
 
-This is an unofficial enhancement distribution for [chenyme/grok2api](https://github.com/chenyme/grok2api): it provides immediate fixed-proxy recovery and egress quality-guard patches, plus a pure CPA-native plugin with no Grok2API runtime dependency. The repository does not copy the complete upstream source.
+**Primary path: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) + Quality Guard sidecar.** The CPA plugin is optional, not the default.
+
+## One-shot install prompt
+
+Paste this to your AI, then append every residential sticky:
+
+```text
+Follow this doc exactly:
+https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_GROK2API_INSTALL.md
+
+Primary path: lij768423-svg/grok2api + Quality Guard sidecar. Do not install CPA.
+Use every residential sticky: one Mihomo listener + one Grok2API node per session.
+A single res-01 node, or merging many stickies into one pool, is not done.
+
+Machine: Linux + Docker, install into ~/grok-stack (new directory).
+Email is optional. Bring the exits and Guard up first.
+
+Residential lines (one per line):
+
+```
+
+Chinese walkthrough: [docs/AI_GROK2API_INSTALL.md](./docs/AI_GROK2API_INSTALL.md). Generator: [`scripts/from_residential.py`](./scripts/from_residential.py).
+
+This is an unofficial enhancement distribution for [chenyme/grok2api](https://github.com/chenyme/grok2api): immediate fixed-proxy recovery, egress quality-guard patches, and the production Quality Guard sidecar (`/quality-guard`). The repository does not copy the complete upstream source.
 
 Current baseline:
 

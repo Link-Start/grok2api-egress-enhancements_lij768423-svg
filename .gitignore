@@ -1,6 +1,9 @@
 .DS_Store
 *.swp
 *~
+egress-gen/
+residential.dump
+scripts/__pycache__/
 
 # CPA plugin build and runtime artifacts
 cpa-plugin/go/*.so

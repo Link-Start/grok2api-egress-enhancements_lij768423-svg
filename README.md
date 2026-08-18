@@ -1,6 +1,32 @@
-# Grok2API & CPA 出口质量守护
+# Grok2API 出口质量守护
 
-这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，同时提供零 Grok2API 运行时依赖的纯 CPA 原生插件，以及当前生产在跑的 **Quality Guard sidecar**（管理页 `/quality-guard`）。仓库不复制上游完整源码。
+**主推 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) + Quality Guard sidecar。**  
+CPA 插件在 `cpa-plugin/`，不是默认交付。
+
+别人要接近我们现网：把全部家宽丢给 AI，不要只开一个节点。
+
+## 一键安装提示词
+
+整段复制发给你的 AI，只改最后的家宽：
+
+```text
+按这个文档装，不要发挥：
+https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_GROK2API_INSTALL.md
+
+主路径：lij768423-svg/grok2api + Quality Guard sidecar。不要装 CPA。
+家宽全部用上，每个 sticky 一个节点。禁止只开 1 个交差。
+只贴 1 条、或把多条合成一个「住宅池」，都算没装完。
+
+机器：Linux + Docker，装到 ~/grok-stack（新目录，别覆盖现网）。
+有邮箱再一起装注册机；没有也行，先把出口和 Guard 拉起来。
+
+家宽（一行一条，URL / host:port:user:pass / 带 sid 都行）：
+
+```
+
+AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽拆成 Mihomo listener + Grok2API 节点，再按 lab 默认打开 Guard。完整步骤：[docs/AI_GROK2API_INSTALL.md](./docs/AI_GROK2API_INSTALL.md)。
+
+这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，以及当前生产在跑的 **Quality Guard sidecar**（管理页 `/quality-guard`）。仓库不复制上游完整源码。
 
 当前补丁基于：
 
@@ -72,7 +98,7 @@
 
 `cpa-plugin/` 现为 **v1.0.9 纯 CPA 原生插件**，不依赖、不连接 Grok2API 运行时。它通过 CPA Host API 读取认证文件和 Usage 事件，把账号的 `proxy_url` 粘性绑定到出口节点，并提供节点 CRUD、逐行批量导入、批量操作、连通性/真实质量检测、可配置探针方案（吞吐基线 / 预期标记 / 自定义 Prompt）、隔离迁号、策略热加载、统计事件和深浅色管理 UI。v1.0.9 起主动探测可按方案校验最后一行或正则标记；v1.0.8 起商店安装后注册不再同步扫认证文件，避免多账号时一直「未生效」；v1.0.7 起 CPA 调度跳过隔离/冷却出口，账号或额度错误只记为 ignored，迁移会写后读回校验，并支持节点白名单化的内部换 IP Webhook。构建与部署方法见 [cpa-plugin/README.md](./cpa-plugin/README.md)，代理规划、账号容量、隔离恢复和强制住宅 IP 轮换见 [AI 部署与运维指南](./cpa-plugin/AI_USAGE_GUIDE.md)。
 
-推荐的完整链路部署方式（家宽/Resin → Mihomo 分片与监听器 → Grok2API/CPA 出口节点 → Quality Guard 检测、摘流、轮换与复测）见[推荐出口部署方式](./docs/RECOMMENDED_DEPLOYMENT.md)。
+推荐的完整链路（家宽 → Mihomo 每 session 一个 listener → **Grok2API 节点** → Quality Guard）见[推荐出口部署方式](./docs/RECOMMENDED_DEPLOYMENT.md)。给 AI 的落地顺序见 [docs/AI_GROK2API_INSTALL.md](./docs/AI_GROK2API_INSTALL.md)。
 
 CPA 本身不会让模型“降智”；这个插件只是在多账号、多出口运行场景中，根据可观测质量信号做可选的出口熔断与迁移。单账号或稳定静态代理场景可以不安装。
 
