@@ -4,17 +4,22 @@ This is an unofficial enhancement distribution for [chenyme/grok2api](https://gi
 
 Current baseline:
 
-- Upstream release: `v3.1.2` (quality guard and probe-wait recovery are already upstream)
-- Upstream commit: `6e9eef7619b83899c82e24353177c8a819f15914`
-- Today's delta: probe profiles + dual-probe recovery + thinking guard (isolate when output ≥ 32 and reasoning=0)
-- Patch file: `patches/0005-fix-missing-thinking-32-token-floor.patch` (stack on 0004)
-- Previous delta: `patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch`
-- Upstream PR: [chenyme/grok2api#930](https://github.com/chenyme/grok2api/pull/930)
-- Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`
+- Upstream release: `v3.1.3` / `main` `57746fc7` (quality guard and thinking guard are already upstream)
+- Today's delta: request-path withhold + account retry (do not deliver missing-thinking streams; up to 5 account switches; 503 if all miss)
+- Patch file: `patches/0006-feat-request-quality-hold-retry.patch` (on current official `main`)
+- Upstream PR: [chenyme/grok2api#959](https://github.com/chenyme/grok2api/pull/959)
+- Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `feat/request-quality-hold-retry`
 
 If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` (closed [#837](https://github.com/chenyme/grok2api/pull/837)).
 
 ## Features
+
+### Request-path missing-thinking hold (v3.1.3+)
+
+- Buffer thinking-model SSE until reasoning appears, or enough visible output arrives with none.
+- Missing thinking (`output ≥ 32`, `reasoning=0`) is **not delivered**. Another account is tried.
+- Up to 6 attempts (first + 5 switches). All misses → `503 quality_degraded`.
+- Off by default: `qualityGuard.requestRetry.enabled: false`.
 
 ### Immediate fixed-proxy recovery
 
@@ -73,6 +78,9 @@ git am --3way /path/to/grok2api-egress-enhancements/patches/0002-feat-add-degrad
 git am --3way /path/to/grok2api-egress-enhancements/patches/0003-feat-add-quality-guard-probe-profiles.patch
 git am --3way /path/to/grok2api-egress-enhancements/patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch
 git am --3way /path/to/grok2api-egress-enhancements/patches/0005-fix-missing-thinking-32-token-floor.patch
+# On current official main (thinking guard already merged), apply only 0006:
+git checkout -b request-quality-hold-retry origin/main
+git am --3way /path/to/grok2api-egress-enhancements/patches/0006-feat-request-quality-hold-retry.patch
 ```
 
 On `v3.0.11`, apply `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` instead. For newer upstream versions, follow [AI_MERGE_GUIDE.md](./docs/AI_MERGE_GUIDE.md) and resolve conflicts according to the documented invariants instead of replacing newer files wholesale.

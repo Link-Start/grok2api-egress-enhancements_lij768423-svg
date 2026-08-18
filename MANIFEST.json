@@ -1,19 +1,20 @@
 {
   "schema": 1,
   "upstream_repository": "https://github.com/chenyme/grok2api",
-  "upstream_tag": "v3.1.2",
-  "upstream_commit": "6e9eef7619b83899c82e24353177c8a819f15914",
-  "patch_commit": "8d73c80a33d8ea80bff93206bfb0f5033a39bc28",
-  "runnable_commit": "8d73c80a33d8ea80bff93206bfb0f5033a39bc28",
-  "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
-  "patch_sha256": "29d29ea5f975f46e925f2b89f8699643e84e0248628170838a2bb9a03fe328bf",
-  "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",
+  "upstream_tag": "v3.1.3",
+  "upstream_commit": "57746fc70289fcbab4bf33db33c521cf756ebbb9",
+  "patch_commit": "506b4e46f9567308ca18494593e6a4d932f40852",
+  "runnable_commit": "506b4e46f9567308ca18494593e6a4d932f40852",
+  "patch_file": "patches/0006-feat-request-quality-hold-retry.patch",
+  "patch_sha256": "433d20fec1ea5caea039f5cbcec971b6c26c3095440818cb7b074479b24d9507",
+  "upstream_pr": "https://github.com/chenyme/grok2api/pull/959",
   "runnable_fork": "https://github.com/lij768423-svg/grok2api",
-  "applies_on": "lij768423-svg/grok2api main after 0004 (362526e544b38e8d3ff8e78b756a6d66f151cde0)",
+  "applies_on": "chenyme/grok2api main at 57746fc7 (after thinking-guard / #930)",
   "previous": {
-    "patch_file": "patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch",
-    "patch_sha256": "03d72194094ed9e4273185708678068f810b7b4c0c540d8f4be9294208d014d0",
-    "note": "Apply 0002 then 0003 then 0004 then 0005 on a clean v3.1.2 tree."
+    "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
+    "patch_sha256": "29d29ea5f975f46e925f2b89f8699643e84e0248628170838a2bb9a03fe328bf",
+    "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",
+    "note": "0005 is already in official main. Apply 0006 on current official main."
   },
   "legacy": {
     "upstream_tag": "v3.0.11",

@@ -4,13 +4,11 @@
 
 当前补丁基于：
 
-- 上游版本：`v3.1.2`（质量守护与固定代理快速恢复已合入官方）
-- 上游提交：`6e9eef7619b83899c82e24353177c8a819f15914`
-- 今日增量：探针方案 + 双探针恢复 + thinking 守卫（输出 ≥ 32 且 reasoning=0 即隔离）
-- 补丁文件：`patches/0005-fix-missing-thinking-32-token-floor.patch`（叠在 0004 上）
-- 上一增量：`patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch`
-- 上游 PR：[chenyme/grok2api#930](https://github.com/chenyme/grok2api/pull/930)
-- 可运行 Fork：[lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`
+- 上游版本：`v3.1.3` / `main` `57746fc7`（质量守护、thinking 守卫已合入官方）
+- 今日增量：请求路径 withhold + 换号重试（缺 thinking 不发给用户，最多换 5 次，打完仍无推理则 503）
+- 补丁文件：`patches/0006-feat-request-quality-hold-retry.patch`（叠在当前官方 main 上）
+- 上游 PR：[chenyme/grok2api#959](https://github.com/chenyme/grok2api/pull/959)
+- 可运行 Fork：[lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `feat/request-quality-hold-retry`
 
 仍停在 `v3.0.11` 时，继续使用遗留补丁 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`（对应已关闭的 [#837](https://github.com/chenyme/grok2api/pull/837)）。
 
@@ -46,6 +44,14 @@
 - 支持单选、全选、批量启用、批量停用和批量删除，并为删除操作提供确认。
 - `QUALITY_GUARD_NODE_IDS` 留空时自动发现所有已启用的代理 Build 节点；状态文件同时发布已解析节点，兼容旧版管理页面。
 - 独立 Python sidecar、Docker Compose、systemd、安全说明和中英文文档。
+
+### 请求路径缺 thinking 拦截（v3.1.3+ 增量）
+
+- 思考模型流式请求在写出给用户前先扣住：看到 `thinking_content` / reasoning 再放行。
+- 可见输出 ≥ 32 且 reasoning=0 记为降智，**不发给用户**，换账号再打。
+- 最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503 quality_degraded`，不再 `deliver_last`。
+- 默认关闭：`qualityGuard.requestRetry.enabled: false`。
+- 审计：`error_code=quality_degraded`。网关日志：`quality_degraded_retry` / `quality_degraded_rejected`。
 
 ### 探针方案（v3.1.2+ 增量）
 
@@ -83,6 +89,9 @@ git am --3way /path/to/grok2api-egress-enhancements/patches/0002-feat-add-degrad
 git am --3way /path/to/grok2api-egress-enhancements/patches/0003-feat-add-quality-guard-probe-profiles.patch
 git am --3way /path/to/grok2api-egress-enhancements/patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch
 git am --3way /path/to/grok2api-egress-enhancements/patches/0005-fix-missing-thinking-32-token-floor.patch
+# 已是当前官方 main（含 #930 / thinking 守卫）时，只打 0006：
+git checkout -b request-quality-hold-retry origin/main
+git am --3way /path/to/grok2api-egress-enhancements/patches/0006-feat-request-quality-hold-retry.patch
 ```
 
 仍基于 `v3.0.11` 时改用 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`。目标版本高于补丁基线时，使用 [AI 合并指南](./docs/AI_MERGE_GUIDE.md)，按功能不变量解决冲突，不要整文件覆盖新版实现。

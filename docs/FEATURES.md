@@ -8,6 +8,12 @@
 
 动态代理池和包含 `{account}` 的代理使用请求级新隧道语义。单次隧道失败不改变共享节点状态，也不触发节点级复测。
 
+## 请求路径缺 thinking 拦截
+
+思考模型的流式响应在写出给客户端之前先扣住。看到 `thinking_content` / `reasoning_content` / reasoning item / `reasoning_tokens>0` 立即放行。可见输出 ≥ `minOutputTokens`（默认 32）且全程无推理，记为降智：**不发给用户**，排除该账号再打。最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503` + `error_code=quality_degraded`，不把最后一枪无推理正文发出去。
+
+开关：`qualityGuard.requestRetry`，默认 `enabled: false`。不处理图/视频/工具、stored response 钉账号、ForcedEgress 探针。
+
 ## 质量守护
 
 主动模式通过管理员专用 API，优先选择明确绑定到目标出口节点的 Grok Build 账号；如果绑定账号不可调度，则借用任意健康 Build 账号，但仍强制实际请求走被测节点。被动模式读取新的成功流式审计，按面板同口径 `输出 Token / (总耗时 - 首字耗时)` 计算速度；输出 Token 故意包含 Reasoning Token。
