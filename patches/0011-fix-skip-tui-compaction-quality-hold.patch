@@ -1,0 +1,179 @@
+From e3420857e903363af4867b0f8f8dbe1779d83c31 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Wed, 19 Aug 2026 01:57:40 +0800
+Subject: [PATCH] fix: skip quality hold for Grok TUI compaction prompts
+
+TUI context compaction posts a normal /v1/responses turn whose last
+user item is the grok-build summary prompt, not compaction_trigger.
+Quality hold treated that as missing-thinking, withheld the stream,
+and fail-closed after six long attempts. Detect the prompt on the last
+input/message item, tag the request as compaction, and skip the hold
+without rewriting the body into a Codex remote-v2 blob.
+---
+ .../application/gateway/quality_retry.go      |  6 ++
+ .../application/gateway/quality_retry_test.go |  8 ++
+ .../gateway/responses_compaction.go           | 78 +++++++++++++++++--
+ .../gateway/responses_compaction_test.go      |  6 ++
+ 4 files changed, 91 insertions(+), 7 deletions(-)
+
+diff --git a/backend/internal/application/gateway/quality_retry.go b/backend/internal/application/gateway/quality_retry.go
+index df99047a..1dfda264 100644
+--- a/backend/internal/application/gateway/quality_retry.go
++++ b/backend/internal/application/gateway/quality_retry.go
+@@ -203,6 +203,12 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
+ 	default:
+ 		return false
+ 	}
++	// TUI compaction is a normal /v1/responses body (no compaction_trigger).
++	// CreateResponse retags it to OperationCompaction; also skip here so a
++	// missed tag cannot withhold a 100s+ summary as missing-thinking.
++	if isResponsesCompactionRequest(input.Body) {
++		return false
++	}
+ 	if route.Provider != accountdomain.ProviderBuild && route.Provider != accountdomain.ProviderConsole {
+ 		return false
+ 	}
+diff --git a/backend/internal/application/gateway/quality_retry_test.go b/backend/internal/application/gateway/quality_retry_test.go
+index 409569d7..fb836a7a 100644
+--- a/backend/internal/application/gateway/quality_retry_test.go
++++ b/backend/internal/application/gateway/quality_retry_test.go
+@@ -495,6 +495,14 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
+ 	if shouldHoldQualityStream(input, nil, route, audit.OperationImage, cfg) {
+ 		t.Fatal("image must not hold")
+ 	}
++	if shouldHoldQualityStream(input, nil, route, audit.OperationCompaction, cfg) {
++		t.Fatal("codex compaction operation must not hold")
++	}
++	tui := input
++	tui.Body = []byte(`{"input":[{"role":"user","content":"` + tuiCompactionPrompt + `"}]}`)
++	if shouldHoldQualityStream(tui, nil, route, audit.OperationResponses, cfg) {
++		t.Fatal("tui compaction prompt must not hold even when tagged responses")
++	}
+ 	for _, test := range []struct {
+ 		name string
+ 		body string
+diff --git a/backend/internal/application/gateway/responses_compaction.go b/backend/internal/application/gateway/responses_compaction.go
+index 44e24178..6db87708 100644
+--- a/backend/internal/application/gateway/responses_compaction.go
++++ b/backend/internal/application/gateway/responses_compaction.go
+@@ -5,22 +5,86 @@ import (
+ 	"strings"
+ )
+ 
+-// isResponsesCompactionRequest detects Codex remote compaction v2 without
+-// retaining or logging the request body. The Provider adapter remains the
+-// authority for validating that the trigger appears exactly once and last.
++// Distinctive line from grok-build full_replace_summary_prompt.txt and the
++// Grok TUI compaction request. Codex remote-v2 uses compaction_trigger
++// instead; the TUI appends this prompt as a normal last user item.
++const clientCompactionPromptMarker = "it is a system-generated compaction prompt, not a real user message"
++
++// isResponsesCompactionRequest detects a context-compaction turn without
++// retaining the request body. Codex remote compaction v2 sends
++// compaction_trigger; Grok TUI sends the canonical summary prompt as the
++// last input/message item. The Provider adapter still requires the trigger
++// before it rewrites the body into an encrypted compaction blob.
+ func isResponsesCompactionRequest(body []byte) bool {
+ 	var payload struct {
+-		Input []struct {
+-			Type string `json:"type"`
+-		} `json:"input"`
++		Input    []json.RawMessage `json:"input"`
++		Messages []json.RawMessage `json:"messages"`
+ 	}
+ 	if json.Unmarshal(body, &payload) != nil {
+ 		return false
+ 	}
+-	for _, item := range payload.Input {
++	if hasCompactionTrigger(payload.Input) {
++		return true
++	}
++	return lastItemLooksLikeCompactionPrompt(payload.Input) || lastItemLooksLikeCompactionPrompt(payload.Messages)
++}
++
++func hasCompactionTrigger(items []json.RawMessage) bool {
++	for _, raw := range items {
++		var item struct {
++			Type string `json:"type"`
++		}
++		if json.Unmarshal(raw, &item) != nil {
++			continue
++		}
+ 		if strings.EqualFold(strings.TrimSpace(item.Type), "compaction_trigger") {
+ 			return true
+ 		}
+ 	}
+ 	return false
+ }
++
++func lastItemLooksLikeCompactionPrompt(items []json.RawMessage) bool {
++	if len(items) == 0 {
++		return false
++	}
++	return looksLikeCompactionPrompt(extractInputItemText(items[len(items)-1]))
++}
++
++func looksLikeCompactionPrompt(text string) bool {
++	return strings.Contains(text, clientCompactionPromptMarker)
++}
++
++func extractInputItemText(raw json.RawMessage) string {
++	var item struct {
++		Content json.RawMessage `json:"content"`
++	}
++	if json.Unmarshal(raw, &item) != nil {
++		return extractContentText(raw)
++	}
++	if len(item.Content) > 0 {
++		return extractContentText(item.Content)
++	}
++	return extractContentText(raw)
++}
++
++func extractContentText(raw json.RawMessage) string {
++	if len(raw) == 0 {
++		return ""
++	}
++	var text string
++	if json.Unmarshal(raw, &text) == nil {
++		return text
++	}
++	var parts []struct {
++		Text string `json:"text"`
++	}
++	if json.Unmarshal(raw, &parts) == nil {
++		var builder strings.Builder
++		for _, part := range parts {
++			builder.WriteString(part.Text)
++		}
++		return builder.String()
++	}
++	return ""
++}
+diff --git a/backend/internal/application/gateway/responses_compaction_test.go b/backend/internal/application/gateway/responses_compaction_test.go
+index b7d60f63..37734406 100644
+--- a/backend/internal/application/gateway/responses_compaction_test.go
++++ b/backend/internal/application/gateway/responses_compaction_test.go
+@@ -2,6 +2,8 @@ package gateway
+ 
+ import "testing"
+ 
++const tuiCompactionPrompt = "Your task is to produce a faithful, concise summary of the conversation so far. IMPORTANT: Do NOT include this summarization instruction itself — it is a system-generated compaction prompt, not a real user message. Output the final summary inside a single <summary> block."
++
+ func TestIsResponsesCompactionRequest(t *testing.T) {
+ 	tests := []struct {
+ 		name string
+@@ -10,6 +12,10 @@ func TestIsResponsesCompactionRequest(t *testing.T) {
+ 	}{
+ 		{name: "remote v2", body: `{"input":[{"role":"user","content":"continue"},{"type":"compaction_trigger"}]}`, want: true},
+ 		{name: "not terminal", body: `{"input":[{"type":"compaction_trigger"},{"role":"user","content":"continue"}]}`, want: true},
++		{name: "tui last user string", body: `{"input":[{"role":"user","content":"continue"},{"role":"user","content":"` + tuiCompactionPrompt + `"}]}`, want: true},
++		{name: "tui last user parts", body: `{"input":[{"role":"user","content":[{"type":"input_text","text":"` + tuiCompactionPrompt + `"}]}]}`, want: true},
++		{name: "tui chat messages", body: `{"messages":[{"role":"user","content":"` + tuiCompactionPrompt + `"}]}`, want: true},
++		{name: "prompt only in history", body: `{"input":[{"role":"user","content":"` + tuiCompactionPrompt + `"},{"role":"user","content":"continue the task"}]}`},
+ 		{name: "normal responses", body: `{"input":[{"role":"user","content":"continue"}]}`},
+ 		{name: "string input", body: `{"input":"continue"}`},
+ 		{name: "invalid json", body: `{`},
+-- 
+2.50.1 (Apple Git-155)
+

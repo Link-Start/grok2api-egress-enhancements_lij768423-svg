@@ -16,6 +16,8 @@
 
 开关：`qualityGuard.requestRetry`，默认 `enabled: false`。不处理图/视频/工具、stored response 钉账号、ForcedEgress 探针。
 
+Grok TUI 压缩是普通 `/v1/responses`，最后一条 user 是 grok-build 的 summary prompt，**没有** `compaction_trigger`。这条必须标成 `operation=compaction` 并跳过 hold，不能按缺思考换号。不要给 TUI 压缩补 trigger，否则 adapter 会改写成 Codex 加密 blob。历史里出现过这段 prompt、最后一条是普通对话，不当压缩。
+
 ## 质量守护
 
 主动模式通过管理员专用 API，优先选择明确绑定到目标出口节点的 Grok Build 账号；如果绑定账号不可调度，则借用任意健康 Build 账号，但仍强制实际请求走被测节点。被动模式读取新的成功流式审计，按面板同口径 `输出 Token / (总耗时 - 首字耗时)` 计算速度；输出 Token 故意包含 Reasoning Token。

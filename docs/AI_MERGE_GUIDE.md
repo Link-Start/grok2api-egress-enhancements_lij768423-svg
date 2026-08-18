@@ -17,11 +17,12 @@
 增量补丁（短回复 0 thinking）：patches/0005-fix-missing-thinking-32-token-floor.patch
 增量补丁（请求路径 withhold+换号）：patches/0006-feat-request-quality-hold-retry.patch
 增量补丁（缺思考 24h 冷却 / 再犯禁用 + 降智列表）：patches/0010-feat-missing-thinking-cooldown-and-degrade-list.patch
+增量补丁（TUI 压缩不当无思考）：patches/0011-fix-skip-tui-compaction-quality-hold.patch
 遗留补丁（仅 v3.0.11）：patches/0001-feat-add-egress-recovery-and-quality-guard.patch
 设计说明：docs/FEATURES.md
 
 要求：
-1. 先阅读目标仓库当前的出口节点、代理池、请求审计、管理员路由和前端结构。目标已是当前官方 main（#959 已合入）时打 0010。目标仍是干净 v3.1.2 时先打 0002–0005 再打 0006，再打 0010。不要再打 0001。
+1. 先阅读目标仓库当前的出口节点、代理池、请求审计、管理员路由和前端结构。目标已是当前官方 main（#959 已合入）时打 0010，再打 0011。目标仍是干净 v3.1.2 时先打 0002–0005 再打 0006，再打 0010/0011。不要再打 0001。
 2. 使用 git am --3way 尝试应用补丁；有冲突时按语义移植，不得整文件覆盖新版实现。
 3. 保留目标版本新增的数据库字段、API、路由策略、鉴权中间件和 UI 行为。
 4. 固定代理快速恢复必须保持：先持久化冷却，再启动按节点合并的独立探针；绑定请求限时等待；健康后重新读取状态；不健康维持冷却；请求取消立即退出。

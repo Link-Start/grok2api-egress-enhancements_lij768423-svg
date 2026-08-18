@@ -32,7 +32,8 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 
 | 能力 | 本仓代码 | 上游 PR | 别人怎么用到 |
 | --- | --- | --- | --- |
-| 缺 thinking 冷却 24h / 再犯禁用 + 降智列表 | `patches/0010-*.patch` | [#966](https://github.com/chenyme/grok2api/pull/966) | clone **fork** 再 `--build` |
+| TUI 压缩不当无思考 | `patches/0011-*.patch` | [#967](https://github.com/chenyme/grok2api/pull/967) | clone **fork** 再 `--build` |
+| 缺 thinking 冷却 24h / 再犯禁用 + 降智列表 | `patches/0010-*.patch` | [#966](https://github.com/chenyme/grok2api/pull/966) | 同上 |
 | 缺 thinking 扣住换号 | `patches/0006-*.patch` | [#959](https://github.com/chenyme/grok2api/pull/959) | 同上（官方已合） |
 | compact 漂移仍留摘要 | `patches/0007-*.patch` | [#956](https://github.com/chenyme/grok2api/pull/956) | 同上 |
 | 搬号 30%/10% 上限 | `patches/0008-*.patch` | [#957](https://github.com/chenyme/grok2api/pull/957) | 同上 |
