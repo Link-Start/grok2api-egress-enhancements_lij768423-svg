@@ -1,0 +1,728 @@
+From 52addf90df1dce9345b66dd28afd3a5f285d2ef9 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Tue, 18 Aug 2026 23:54:26 +0800
+Subject: [PATCH] feat: cool missing-thinking accounts and list them in quality
+ guard
+
+First no-thinking withhold puts the account on a 24h scheduling
+cooldown without disabling it. A later miss after that cooldown
+expires disables the account. Quality-guard degrade-accounts now
+includes quality_degraded retries as missing_thinking so operators
+can see the rotated accounts.
+---
+ backend/internal/app/application.go           |  1 +
+ backend/internal/application/audit/degrade.go | 12 +--
+ .../application/audit/degrade_test.go         | 52 ++++++++++++
+ .../application/gateway/quality_retry.go      | 31 +++++--
+ .../application/gateway/quality_retry_test.go |  2 +-
+ .../internal/application/gateway/selector.go  | 49 ++++++++++-
+ .../application/gateway/selector_test.go      | 83 +++++++++++++++++++
+ .../internal/application/gateway/service.go   |  7 +-
+ backend/internal/domain/audit/degrade.go      |  8 +-
+ backend/internal/infra/config/config.go       |  5 ++
+ .../relational/audit_repository.go            | 32 ++++---
+ backend/internal/repository/audit.go          |  2 +
+ .../internal/transport/http/audit/handler.go  |  3 +-
+ config.example.yaml                           |  3 +
+ .../quality-guard/degrade-accounts-panel.tsx  |  6 +-
+ .../quality-guard/quality-guard-api.ts        |  8 +-
+ frontend/src/shared/i18n/index.ts             |  8 +-
+ 17 files changed, 274 insertions(+), 38 deletions(-)
+
+diff --git a/backend/internal/app/application.go b/backend/internal/app/application.go
+index e170426b..918736fd 100644
+--- a/backend/internal/app/application.go
++++ b/backend/internal/app/application.go
+@@ -496,6 +496,7 @@ func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.Qu
+ 		HoldTimeout:     value.HoldTimeout.Value(),
+ 		MinOutputTokens: int64(value.MinOutputTokens),
+ 		OnExhausted:     value.OnExhausted,
++		AccountCooldown: value.AccountCooldown.Value(),
+ 	}
+ }
+ 
+diff --git a/backend/internal/application/audit/degrade.go b/backend/internal/application/audit/degrade.go
+index 06880b28..2b6e4950 100644
+--- a/backend/internal/application/audit/degrade.go
++++ b/backend/internal/application/audit/degrade.go
+@@ -59,6 +59,7 @@ type DegradeTotals struct {
+ 	Hard         int64
+ 	Soft         int64
+ 	Burst        int64
++	Thinking     int64
+ 	MaxTPS       float64
+ }
+ 
+@@ -184,7 +185,7 @@ func normalizeDegradeAccountFilter(value DegradeAccountFilter) DegradeAccountFil
+ 	if value.Status != "enabled" && value.Status != "disabled" && value.Status != "deleted" {
+ 		value.Status = ""
+ 	}
+-	if value.Class != auditdomain.DegradeClassBurst && value.Class != auditdomain.DegradeClassSoft && value.Class != auditdomain.DegradeClassHard {
++	if value.Class != auditdomain.DegradeClassBurst && value.Class != auditdomain.DegradeClassSoft && value.Class != auditdomain.DegradeClassHard && value.Class != auditdomain.DegradeClassThinking {
+ 		value.Class = ""
+ 	}
+ 	if value.MinHits < 1 {
+@@ -205,9 +206,10 @@ func buildDegradeSummary(window string, now time.Time, thresholds DegradeThresho
+ 		accounts = append(accounts, DegradeAccount{
+ 			ID: value.ID, Name: value.Name, Email: value.Email, Hits: value.Hits, MaxTPS: round(value.MaxTPS, 1),
+ 			Classes: map[string]int64{
+-				auditdomain.DegradeClassBurst: value.Burst,
+-				auditdomain.DegradeClassSoft:  value.Soft,
+-				auditdomain.DegradeClassHard:  value.Hard,
++				auditdomain.DegradeClassBurst:    value.Burst,
++				auditdomain.DegradeClassSoft:     value.Soft,
++				auditdomain.DegradeClassHard:     value.Hard,
++				auditdomain.DegradeClassThinking: value.Thinking,
+ 			},
+ 			Nodes: value.Nodes, Last: value.Last, Enabled: value.Enabled, Found: value.Found, BFS: value.BuildBotFlagSource,
+ 		})
+@@ -243,7 +245,7 @@ func buildDegradeSummary(window string, now time.Time, thresholds DegradeThresho
+ 		Totals: DegradeTotals{
+ 			Hits: data.Totals.Hits, Accounts: data.Totals.Accounts, StillEnabled: data.Totals.StillEnabled,
+ 			Disabled: data.Totals.Disabled, Deleted: data.Totals.Deleted, Hard: data.Totals.Hard,
+-			Soft: data.Totals.Soft, Burst: data.Totals.Burst, MaxTPS: round(data.Totals.MaxTPS, 2),
++			Soft: data.Totals.Soft, Burst: data.Totals.Burst, Thinking: data.Totals.Thinking, MaxTPS: round(data.Totals.MaxTPS, 2),
+ 		},
+ 		Series: series, Nodes: nodes, Accounts: accounts,
+ 		AccountPage: DegradeAccountPage{
+diff --git a/backend/internal/application/audit/degrade_test.go b/backend/internal/application/audit/degrade_test.go
+index 2c28488f..2d35feeb 100644
+--- a/backend/internal/application/audit/degrade_test.go
++++ b/backend/internal/application/audit/degrade_test.go
+@@ -233,6 +233,58 @@ func TestDegradeSummarySearchesEveryAccountIdentityField(t *testing.T) {
+ 	}
+ }
+ 
++func TestDegradeSummaryIncludesQualityDegradedThinkingRetries(t *testing.T) {
++	ctx := context.Background()
++	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "degrade-thinking.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer database.Close()
++	if err := database.InitializeSchema(ctx); err != nil {
++		t.Fatal(err)
++	}
++	repo := relational.NewAuditRepository(database)
++	now := time.Now().UTC()
++	first := int64(100)
++	speedID := uint64(11)
++	thinkingID := uint64(22)
++	records := []auditdomain.Record{
++		{RequestID: "speed-hard", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_build", AccountID: &speedID, AccountName: "fast", EgressNodeName: "edge-1", StatusCode: 200, Streaming: true, OutputTokens: 2000, FirstTokenMS: &first, DurationMS: 1100, CreatedAt: now.Add(-2 * time.Minute)},
++		{RequestID: "think-retry-1", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_build", AccountID: &thinkingID, AccountName: "no-think", EgressNodeName: "edge-2", StatusCode: 200, Streaming: true, ErrorCode: auditdomain.ErrorQualityDegraded, OutputTokens: 48, CreatedAt: now.Add(-time.Minute)},
++		{RequestID: "think-retry-2", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_build", AccountID: &thinkingID, AccountName: "no-think", EgressNodeName: "edge-2", StatusCode: 200, Streaming: true, ErrorCode: auditdomain.ErrorQualityDegraded, OutputTokens: 0, CreatedAt: now.Add(-30 * time.Second)},
++		{RequestID: "think-final-503", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_build", AccountID: &thinkingID, AccountName: "no-think", StatusCode: 503, Streaming: true, ErrorCode: auditdomain.ErrorQualityDegraded, CreatedAt: now.Add(-20 * time.Second)},
++	}
++	if err := repo.CreateBatch(ctx, records); err != nil {
++		t.Fatal(err)
++	}
++	service := NewService(repo, slog.Default(), 8, 4, time.Second)
++	service.now = func() time.Time { return now }
++	summary, err := service.DegradeSummary(ctx, "1h", DegradeThresholds{SoftTPS: 500, HardTPS: 1000}, DegradeAccountFilter{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if summary.Totals.Hits != 3 || summary.Totals.Accounts != 2 || summary.Totals.Hard != 1 || summary.Totals.Thinking != 2 {
++		t.Fatalf("totals = %#v", summary.Totals)
++	}
++	if len(summary.Accounts) != 2 {
++		t.Fatalf("accounts = %#v", summary.Accounts)
++	}
++	byID := map[uint64]DegradeAccount{}
++	for _, account := range summary.Accounts {
++		byID[account.ID] = account
++	}
++	if byID[22].Hits != 2 || byID[22].Classes[auditdomain.DegradeClassThinking] != 2 {
++		t.Fatalf("thinking account = %#v", byID[22])
++	}
++	thinkingOnly, err := service.DegradeSummary(ctx, "1h", DegradeThresholds{SoftTPS: 500, HardTPS: 1000}, DegradeAccountFilter{Class: auditdomain.DegradeClassThinking})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if thinkingOnly.AccountPage.Total != 1 || len(thinkingOnly.Accounts) != 1 || thinkingOnly.Accounts[0].ID != 22 {
++		t.Fatalf("thinking filter = %#v", thinkingOnly)
++	}
++}
++
+ func TestDegradeSummaryRejectsUnknownWindow(t *testing.T) {
+ 	ctx := context.Background()
+ 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "degrade-window.db"))
+diff --git a/backend/internal/application/gateway/quality_retry.go b/backend/internal/application/gateway/quality_retry.go
+index df99047a..40a639b8 100644
+--- a/backend/internal/application/gateway/quality_retry.go
++++ b/backend/internal/application/gateway/quality_retry.go
+@@ -16,12 +16,15 @@ import (
+ )
+ 
+ const (
+-	ErrorQualityDegraded      = "quality_degraded"
+-	qualityRetryFailOpen      = "fail_open"
+-	qualityRetryFailClosed    = "fail_closed"
+-	defaultQualityMaxAttempts = 6
+-	defaultQualityHoldTimeout = 3 * time.Second
+-	defaultQualityMinOutput   = int64(32)
++	ErrorQualityDegraded             = "quality_degraded"
++	qualityRetryFailOpen             = "fail_open"
++	qualityRetryFailClosed           = "fail_closed"
++	defaultQualityMaxAttempts        = 6
++	defaultQualityHoldTimeout        = 3 * time.Second
++	defaultQualityMinOutput          = int64(32)
++	defaultMissingThinkingCooldown   = 24 * time.Hour
++	lastErrorMissingThinking         = "missing_thinking"
++	lastErrorMissingThinkingDisabled = "missing_thinking_disabled"
+ )
+ 
+ var errQualityDegraded = errors.New("上游响应缺少推理")
+@@ -34,6 +37,7 @@ type QualityRetryRuntime struct {
+ 	HoldTimeout     time.Duration
+ 	MinOutputTokens int64
+ 	OnExhausted     string
++	AccountCooldown time.Duration
+ }
+ 
+ // QualityStreamSignals is the hold classifier input. Tests drive this
+@@ -76,6 +80,9 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
+ 	if cfg.MinOutputTokens <= 0 {
+ 		cfg.MinOutputTokens = defaultQualityMinOutput
+ 	}
++	if cfg.AccountCooldown <= 0 {
++		cfg.AccountCooldown = defaultMissingThinkingCooldown
++	}
+ 	cfg.OnExhausted = normalizeQualityExhaustionPolicy(cfg.OnExhausted)
+ 	return cfg
+ }
+@@ -269,6 +276,18 @@ func jsonStringEquals(raw json.RawMessage, want string) bool {
+ 	return json.Unmarshal(raw, &value) == nil && strings.EqualFold(strings.TrimSpace(value), want)
+ }
+ 
++func (s *Service) applyMissingThinkingPenalty(ctx context.Context, requestID string, credential accountdomain.Credential, cooldown time.Duration) {
++	if err := s.selector.MarkMissingThinking(ctx, credential, cooldown); err != nil {
++		s.logger.Error("quality_degraded_penalty_failed", "request_id", requestID, "account_id", credential.ID, "error", err)
++		return
++	}
++	if isMissingThinkingStrike(credential.LastError) && (credential.CooldownUntil == nil || !time.Now().UTC().Before(*credential.CooldownUntil)) {
++		s.logger.Info("quality_degraded_disabled", "request_id", requestID, "account_id", credential.ID)
++		return
++	}
++	s.logger.Info("quality_degraded_cooldown", "request_id", requestID, "account_id", credential.ID, "cooldown", cooldown.String())
++}
++
+ func (s *Service) recordQualityDegraded(ctx context.Context, base audit.Record, credential accountdomain.Credential, usage Usage, startedAt time.Time, trace *infraegress.Trace, provider accountdomain.Provider) {
+ 	record := base
+ 	record.EventID = newAuditEventID()
+diff --git a/backend/internal/application/gateway/quality_retry_test.go b/backend/internal/application/gateway/quality_retry_test.go
+index 409569d7..80d9b4a4 100644
+--- a/backend/internal/application/gateway/quality_retry_test.go
++++ b/backend/internal/application/gateway/quality_retry_test.go
+@@ -809,7 +809,7 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
+ func TestNormalizeQualityRetryDefaults(t *testing.T) {
+ 	t.Parallel()
+ 	got := normalizeQualityRetry(QualityRetryRuntime{Enabled: true})
+-	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 32 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second {
++	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 32 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second || got.AccountCooldown != 24*time.Hour {
+ 		t.Fatalf("defaults = %#v", got)
+ 	}
+ }
+diff --git a/backend/internal/application/gateway/selector.go b/backend/internal/application/gateway/selector.go
+index 7604c2bc..a561f297 100644
+--- a/backend/internal/application/gateway/selector.go
++++ b/backend/internal/application/gateway/selector.go
+@@ -920,8 +920,13 @@ func (s *Selector) MarkSuccess(ctx context.Context, credential account.Credentia
+ 	s.markSuccess(ctx, credential, true)
+ }
+ 
++func isMissingThinkingStrike(lastError string) bool {
++	return lastError == lastErrorMissingThinking || lastError == lastErrorMissingThinkingDisabled
++}
++
+ func (s *Selector) markSuccess(ctx context.Context, credential account.Credential, quotaProbe bool) {
+ 	now := time.Now().UTC()
++	keepThinkingStrike := isMissingThinkingStrike(credential.LastError)
+ 	healthChanged := credential.FailureCount > 0 || credential.CooldownUntil != nil || credential.LastError != ""
+ 	touchLastUsed := healthChanged
+ 	s.selectionMu.Lock()
+@@ -933,7 +938,11 @@ func (s *Selector) markSuccess(ctx context.Context, credential account.Credentia
+ 	}
+ 	s.selectionMu.Unlock()
+ 	if healthChanged {
+-		if err := s.accounts.UpdateHealth(ctx, credential.ID, credential.Provider, 0, nil, "", true); err == nil {
++		lastError := ""
++		if keepThinkingStrike {
++			lastError = lastErrorMissingThinking
++		}
++		if err := s.accounts.UpdateHealth(ctx, credential.ID, credential.Provider, 0, nil, lastError, true); err == nil {
+ 			s.ApplyInvalidation(repository.InvalidationEvent{
+ 				Kind: repository.InvalidationAccountHealthChanged, Provider: credential.Provider, AccountID: credential.ID,
+ 			})
+@@ -1107,6 +1116,44 @@ func (s *Selector) clearQuotaConsumptionAccount(provider account.Provider, accou
+ 	s.quotaMu.Unlock()
+ }
+ 
++// MarkMissingThinking cools an account for the first no-thinking hit and
++// disables it if missing thinking appears again after that cooldown.
++func (s *Selector) MarkMissingThinking(ctx context.Context, credential account.Credential, cooldown time.Duration) error {
++	if cooldown <= 0 {
++		cooldown = defaultMissingThinkingCooldown
++	}
++	now := time.Now().UTC()
++	inCooldown := credential.CooldownUntil != nil && now.Before(*credential.CooldownUntil)
++	if isMissingThinkingStrike(credential.LastError) && !inCooldown {
++		disabled := false
++		if _, err := s.accounts.UpdateMany(ctx, credential.Provider, []uint64{credential.ID}, repository.AccountUpdates{Enabled: &disabled}); err != nil {
++			return err
++		}
++		_ = s.accounts.UpdateHealth(ctx, credential.ID, credential.Provider, credential.FailureCount, nil, lastErrorMissingThinkingDisabled, false)
++		s.ApplyInvalidation(repository.InvalidationEvent{
++			Kind: repository.InvalidationAccountStateChanged, Provider: credential.Provider, AccountID: credential.ID,
++		})
++		s.evictCandidate(credential.Provider, credential.ID)
++		if s.sticky != nil {
++			_ = s.sticky.DeleteByAccount(ctx, credential.ID)
++		}
++		return nil
++	}
++	if inCooldown {
++		return nil
++	}
++	until := now.Add(cooldown)
++	if err := s.accounts.UpdateHealth(ctx, credential.ID, credential.Provider, credential.FailureCount, &until, lastErrorMissingThinking, false); err != nil {
++		return err
++	}
++	s.ApplyInvalidation(repository.InvalidationEvent{
++		Kind: repository.InvalidationAccountHealthChanged, Provider: credential.Provider, AccountID: credential.ID,
++		FailureCount: credential.FailureCount, CooldownUntil: &until,
++	})
++	s.evictCandidate(credential.Provider, credential.ID)
++	return nil
++}
++
+ func (s *Selector) MarkFailure(ctx context.Context, credential account.Credential, status int, retryAfter time.Duration) {
+ 	_ = s.markFailure(ctx, credential, credential.FailureCount, credential.FailureCount+1, status, retryAfter)
+ }
+diff --git a/backend/internal/application/gateway/selector_test.go b/backend/internal/application/gateway/selector_test.go
+index a239563f..0545c1bf 100644
+--- a/backend/internal/application/gateway/selector_test.go
++++ b/backend/internal/application/gateway/selector_test.go
+@@ -1472,6 +1472,89 @@ func (s *recordingStickyStore) Expiries() []time.Time {
+ 	return append([]time.Time(nil), s.expiries...)
+ }
+ 
++func TestMarkMissingThinkingCoolsThenDisables(t *testing.T) {
++	ctx := context.Background()
++	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "missing-thinking.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer database.Close()
++	if err := database.InitializeSchema(ctx); err != nil {
++		t.Fatal(err)
++	}
++	accounts := relational.NewAccountRepository(database)
++	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
++		Provider: account.ProviderBuild, Name: "no-think", SourceKey: "no-think", EncryptedAccessToken: "encrypted", Enabled: true,
++		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, 30*time.Second, 30*time.Minute, 500*time.Millisecond)
++	before := time.Now().UTC()
++	if err := selector.MarkMissingThinking(ctx, credential, time.Hour); err != nil {
++		t.Fatal(err)
++	}
++	first, err := accounts.Get(ctx, credential.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !first.Enabled || first.LastError != lastErrorMissingThinking || first.CooldownUntil == nil {
++		t.Fatalf("first strike = %#v", first)
++	}
++	if wait := first.CooldownUntil.Sub(before); wait < 50*time.Minute || wait > 70*time.Minute {
++		t.Fatalf("first cooldown = %s", wait)
++	}
++	if err := selector.MarkMissingThinking(ctx, first, time.Hour); err != nil {
++		t.Fatal(err)
++	}
++	stillCooling, err := accounts.Get(ctx, credential.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !stillCooling.Enabled {
++		t.Fatal("in-cooldown second call must not disable")
++	}
++	expired := time.Now().UTC().Add(-time.Second)
++	stillCooling.CooldownUntil = &expired
++	if err := selector.MarkMissingThinking(ctx, stillCooling, time.Hour); err != nil {
++		t.Fatal(err)
++	}
++	second, err := accounts.Get(ctx, credential.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if second.Enabled {
++		t.Fatalf("second strike after cooldown must disable, got %#v", second)
++	}
++	if second.LastError != lastErrorMissingThinkingDisabled {
++		t.Fatalf("disabled last error = %q", second.LastError)
++	}
++
++	ok, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
++		Provider: account.ProviderBuild, Name: "recovered", SourceKey: "recovered", EncryptedAccessToken: "encrypted", Enabled: true,
++		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := selector.MarkMissingThinking(ctx, ok, time.Hour); err != nil {
++		t.Fatal(err)
++	}
++	cooled, err := accounts.Get(ctx, ok.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	selector.MarkSuccess(ctx, cooled)
++	kept, err := accounts.Get(ctx, ok.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if kept.LastError != lastErrorMissingThinking || kept.CooldownUntil != nil || kept.FailureCount != 0 {
++		t.Fatalf("success must keep thinking strike and clear cooldown, got %#v", kept)
++	}
++}
++
+ func TestMarkFailureSoftNetworkCooldown(t *testing.T) {
+ 	ctx := context.Background()
+ 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "soft-network.db"))
+diff --git a/backend/internal/application/gateway/service.go b/backend/internal/application/gateway/service.go
+index 666bb7bd..0e3dc4ec 100644
+--- a/backend/internal/application/gateway/service.go
++++ b/backend/internal/application/gateway/service.go
+@@ -454,7 +454,9 @@ func (s *Service) UpdateMaxAttempts(maxAttempts int) { s.maxAttempts.Store(int64
+ 
+ // UpdateVideoMaxAttempts configures create-phase account failover for video jobs.
+ // 0 is treated as the general default pool size for legacy configs.
+-func (s *Service) UpdateVideoMaxAttempts(maxAttempts int) { s.videoMaxAttempts.Store(int64(maxAttempts)) }
++func (s *Service) UpdateVideoMaxAttempts(maxAttempts int) {
++	s.videoMaxAttempts.Store(int64(maxAttempts))
++}
+ 
+ // UpdateMarkBuildChatDeniedAsReauth 热更新 Build chat 永久拒绝是否标 reauthRequired。
+ // 默认 false：仅模型级冷却；true 时按旧逻辑将账号标为失效并出池。
+@@ -1512,6 +1514,9 @@ attemptLoop:
+ 				hasNextAccount := attemptPolicy.hasNext(attempt) && selection.hasAvailableCandidate(excluded, !quotaProbeAttempted)
+ 				hasNextAccount = hasNextAccount && qualityAccountAttempts < holdCfg.MaxAttempts
+ 				commit := CommitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
++				if verdict == QualityWithhold {
++					s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
++				}
+ 				deferFailOpenAudit := commit.Action == QualityActionRetry && holdCfg.OnExhausted == qualityRetryFailOpen
+ 				if commit.Audit && !deferFailOpenAudit {
+ 					s.recordQualityDegraded(ctx, auditBase, credential, peekUsage, startedAt, egressTrace, route.Provider)
+diff --git a/backend/internal/domain/audit/degrade.go b/backend/internal/domain/audit/degrade.go
+index e3b7b2e4..6abc6798 100644
+--- a/backend/internal/domain/audit/degrade.go
++++ b/backend/internal/domain/audit/degrade.go
+@@ -1,9 +1,11 @@
+ package audit
+ 
+ const (
+-	DegradeClassBurst = "buffered_burst"
+-	DegradeClassSoft  = "soft_tps"
+-	DegradeClassHard  = "hard_tps"
++	DegradeClassBurst    = "buffered_burst"
++	DegradeClassSoft     = "soft_tps"
++	DegradeClassHard     = "hard_tps"
++	DegradeClassThinking = "missing_thinking"
++	ErrorQualityDegraded = "quality_degraded"
+ )
+ 
+ const (
+diff --git a/backend/internal/infra/config/config.go b/backend/internal/infra/config/config.go
+index 49f611c2..46d8f70b 100644
+--- a/backend/internal/infra/config/config.go
++++ b/backend/internal/infra/config/config.go
+@@ -291,6 +291,7 @@ type QualityGuardRequestRetryConfig struct {
+ 	HoldTimeout     Duration `yaml:"holdTimeout"`
+ 	MinOutputTokens int      `yaml:"minOutputTokens"`
+ 	OnExhausted     string   `yaml:"onExhausted"`
++	AccountCooldown Duration `yaml:"accountCooldown"`
+ }
+ 
+ type ClientKeyDefaultsConfig struct {
+@@ -774,6 +775,9 @@ func validateQualityGuardRequestRetry(value QualityGuardRequestRetryConfig) erro
+ 	default:
+ 		return errors.New("qualityGuard.requestRetry.onExhausted 必须是 fail_open 或 fail_closed")
+ 	}
++	if d := value.AccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
++		return errors.New("qualityGuard.requestRetry.accountCooldown 必须在 1m 到 168h 之间")
++	}
+ 	return nil
+ }
+ 
+@@ -907,6 +911,7 @@ func defaultConfig() Config {
+ 			MinimumGenerationWindow: Duration(time.Second), RotationTimeout: Duration(45 * time.Second),
+ 			RequestRetry: QualityGuardRequestRetryConfig{
+ 				MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed",
++				AccountCooldown: Duration(24 * time.Hour),
+ 			},
+ 		},
+ 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
+diff --git a/backend/internal/infra/persistence/relational/audit_repository.go b/backend/internal/infra/persistence/relational/audit_repository.go
+index 8ec8eb54..840162fb 100644
+--- a/backend/internal/infra/persistence/relational/audit_repository.go
++++ b/backend/internal/infra/persistence/relational/audit_repository.go
+@@ -694,6 +694,7 @@ type degradeTotalsRow struct {
+ 	Hard         int64   `gorm:"column:hard"`
+ 	Soft         int64   `gorm:"column:soft"`
+ 	Burst        int64   `gorm:"column:burst"`
++	Thinking     int64   `gorm:"column:thinking"`
+ 	MaxTPS       float64 `gorm:"column:max_tps"`
+ }
+ 
+@@ -706,6 +707,7 @@ type degradeAccountRow struct {
+ 	Burst              int64            `gorm:"column:burst"`
+ 	Soft               int64            `gorm:"column:soft"`
+ 	Hard               int64            `gorm:"column:hard"`
++	Thinking           int64            `gorm:"column:thinking"`
+ 	Last               degradeTimestamp `gorm:"column:last_seen"`
+ 	Enabled            bool             `gorm:"column:enabled"`
+ 	Found              bool             `gorm:"column:found"`
+@@ -809,6 +811,7 @@ func (r *AuditRepository) SummarizeDegrade(ctx context.Context, input repository
+ 				COALESCE(SUM(CASE WHEN d.degrade_class = 'hard_tps' THEN 1 ELSE 0 END), 0) AS hard,
+ 				COALESCE(SUM(CASE WHEN d.degrade_class = 'soft_tps' THEN 1 ELSE 0 END), 0) AS soft,
+ 				COALESCE(SUM(CASE WHEN d.degrade_class = 'buffered_burst' THEN 1 ELSE 0 END), 0) AS burst,
++				COALESCE(SUM(CASE WHEN d.degrade_class = 'missing_thinking' THEN 1 ELSE 0 END), 0) AS thinking,
+ 				COALESCE(MAX(d.tps), 0) AS max_tps`).
+ 			Joins("LEFT JOIN provider_accounts p ON p.id = d.account_id").
+ 			Scan(&totals).Error; err != nil {
+@@ -817,7 +820,7 @@ func (r *AuditRepository) SummarizeDegrade(ctx context.Context, input repository
+ 		result.Totals = repository.DegradeTotals{
+ 			Hits: totals.Hits, Accounts: totals.Accounts, StillEnabled: totals.StillEnabled,
+ 			Disabled: totals.Disabled, Deleted: totals.Deleted, Hard: totals.Hard, Soft: totals.Soft,
+-			Burst: totals.Burst, MaxTPS: totals.MaxTPS,
++			Burst: totals.Burst, Thinking: totals.Thinking, MaxTPS: totals.MaxTPS,
+ 		}
+ 
+ 		accountQuery := r.degradeAccountAggregate(tx, classified, input)
+@@ -840,7 +843,7 @@ func (r *AuditRepository) SummarizeDegrade(ctx context.Context, input repository
+ 		for _, row := range accountRows {
+ 			result.Accounts = append(result.Accounts, repository.DegradeAccount{
+ 				ID: row.ID, Name: row.Name, Email: row.Email, Hits: row.Hits, MaxTPS: row.MaxTPS,
+-				Burst: row.Burst, Soft: row.Soft, Hard: row.Hard, Last: time.Time(row.Last), Enabled: row.Enabled,
++				Burst: row.Burst, Soft: row.Soft, Hard: row.Hard, Thinking: row.Thinking, Last: time.Time(row.Last), Enabled: row.Enabled,
+ 				Found: row.Found, BuildBotFlagSource: row.BuildBotFlagSource,
+ 			})
+ 			accountIDs = append(accountIDs, row.ID)
+@@ -878,7 +881,7 @@ func (r *AuditRepository) SummarizeDegrade(ctx context.Context, input repository
+ 			bucketed := tx.Table("(?) AS d", classified).Select(caseSQL+" AS bucket_index, d.degrade_class", caseArgs...)
+ 			var bucketRows []degradeBucketRow
+ 			if err := tx.Table("(?) AS b", bucketed).
+-				Select("b.bucket_index, COUNT(*) AS count, COALESCE(SUM(CASE WHEN b.degrade_class IN ('hard_tps', 'buffered_burst') THEN 1 ELSE 0 END), 0) AS severe").
++				Select("b.bucket_index, COUNT(*) AS count, COALESCE(SUM(CASE WHEN b.degrade_class IN ('hard_tps', 'buffered_burst', 'missing_thinking') THEN 1 ELSE 0 END), 0) AS severe").
+ 				Where("b.bucket_index >= 0").Group("b.bucket_index").Order("b.bucket_index ASC").Scan(&bucketRows).Error; err != nil {
+ 				return err
+ 			}
+@@ -916,14 +919,22 @@ func (r *AuditRepository) degradeClassifiedQuery(tx *gorm.DB, input repository.D
+ 	// NULLIF keeps PostgreSQL safe even if its planner evaluates the throughput
+ 	// expression before the duration guard in the WHERE clause.
+ 	tpsExpression := fmt.Sprintf("(CAST(a.output_tokens AS %s) * 1000.0 / NULLIF(%s, 0))", castType, generationExpression)
+-	classExpression := fmt.Sprintf("CASE WHEN ? AND %s < ? THEN ? WHEN %s >= ? THEN ? ELSE ? END", generationExpression, tpsExpression)
++	selectTPS := fmt.Sprintf("CASE WHEN a.error_code = ? THEN 0 ELSE %s END", tpsExpression)
++	classExpression := fmt.Sprintf("CASE WHEN a.error_code = ? THEN ? WHEN ? AND %s < ? THEN ? WHEN %s >= ? THEN ? ELSE ? END", generationExpression, tpsExpression)
++	speedPredicate := fmt.Sprintf(
++		"a.streaming = ? AND %s AND a.output_tokens >= ? AND a.first_token_ms IS NOT NULL AND a.duration_ms > a.first_token_ms AND %s >= ?",
++		auditSuccessPredicate, tpsExpression,
++	)
++	thinkingPredicate := "a.streaming = ? AND a.error_code = ? AND a.status_code >= 200 AND a.status_code < 300"
+ 	query := tx.Table("request_audits AS a").
+-		Select("a.id, a.request_id, a.account_id, a.account_name, a.egress_node_id, a.egress_node_name, a.output_tokens, a.created_at, a.model_upstream_model, "+tpsExpression+" AS tps, "+classExpression+" AS degrade_class",
+-			input.FailClosed, input.MinGenerationMS, audit.DegradeClassBurst, input.HardTPS, audit.DegradeClassHard, audit.DegradeClassSoft).
+-		Where("a.provider = ?", "grok_build").Where("a.streaming = ?", true).
+-		Where(auditSuccessPredicate).Where("a.output_tokens >= ?", input.MinOutputTokens).
+-		Where("a.first_token_ms IS NOT NULL").Where("a.duration_ms > a.first_token_ms").
+-		Where("a.request_id NOT LIKE ?", "quality_%").Where(tpsExpression+" >= ?", input.SoftTPS)
++		Select("a.id, a.request_id, a.account_id, a.account_name, a.egress_node_id, a.egress_node_name, a.output_tokens, a.created_at, a.model_upstream_model, "+selectTPS+" AS tps, "+classExpression+" AS degrade_class",
++			audit.ErrorQualityDegraded,
++			audit.ErrorQualityDegraded, audit.DegradeClassThinking, input.FailClosed, input.MinGenerationMS, audit.DegradeClassBurst, input.HardTPS, audit.DegradeClassHard, audit.DegradeClassSoft).
++		Where("a.provider = ?", "grok_build").
++		Where("a.request_id NOT LIKE ?", "quality_%").
++		Where("(("+speedPredicate+") OR ("+thinkingPredicate+"))",
++			true, input.MinOutputTokens, input.SoftTPS,
++			true, audit.ErrorQualityDegraded)
+ 	if !input.Start.IsZero() {
+ 		query = query.Where("a.created_at >= ?", input.Start)
+ 	}
+@@ -943,6 +954,7 @@ func (r *AuditRepository) degradeAccountAggregate(tx *gorm.DB, classified *gorm.
+ 			COALESCE(SUM(CASE WHEN d.degrade_class = 'buffered_burst' THEN 1 ELSE 0 END), 0) AS burst,
+ 			COALESCE(SUM(CASE WHEN d.degrade_class = 'soft_tps' THEN 1 ELSE 0 END), 0) AS soft,
+ 			COALESCE(SUM(CASE WHEN d.degrade_class = 'hard_tps' THEN 1 ELSE 0 END), 0) AS hard,
++			COALESCE(SUM(CASE WHEN d.degrade_class = 'missing_thinking' THEN 1 ELSE 0 END), 0) AS thinking,
+ 			MAX(d.created_at) AS last_seen,
+ 			COALESCE(p.enabled, FALSE) AS enabled,
+ 			CASE WHEN p.id IS NULL THEN FALSE ELSE TRUE END AS found,
+diff --git a/backend/internal/repository/audit.go b/backend/internal/repository/audit.go
+index d421a5d0..d8e7bced 100644
+--- a/backend/internal/repository/audit.go
++++ b/backend/internal/repository/audit.go
+@@ -61,6 +61,7 @@ type DegradeTotals struct {
+ 	Hard         int64
+ 	Soft         int64
+ 	Burst        int64
++	Thinking     int64
+ 	MaxTPS       float64
+ }
+ 
+@@ -73,6 +74,7 @@ type DegradeAccount struct {
+ 	Burst              int64
+ 	Soft               int64
+ 	Hard               int64
++	Thinking           int64
+ 	Last               time.Time
+ 	Enabled            bool
+ 	Found              bool
+diff --git a/backend/internal/transport/http/audit/handler.go b/backend/internal/transport/http/audit/handler.go
+index 0c22e741..031d50f1 100644
+--- a/backend/internal/transport/http/audit/handler.go
++++ b/backend/internal/transport/http/audit/handler.go
+@@ -386,7 +386,7 @@ func (h *Handler) degradeAccounts(c *gin.Context) {
+ 		Totals: degradeTotalsResponse{
+ 			Hits: result.Totals.Hits, Accounts: result.Totals.Accounts, StillEnabled: result.Totals.StillEnabled,
+ 			Disabled: result.Totals.Disabled, Deleted: result.Totals.Deleted, Hard: result.Totals.Hard,
+-			Soft: result.Totals.Soft, Burst: result.Totals.Burst, MaxTPS: result.Totals.MaxTPS,
++			Soft: result.Totals.Soft, Burst: result.Totals.Burst, Thinking: result.Totals.Thinking, MaxTPS: result.Totals.MaxTPS,
+ 		},
+ 		Series: result.Series, Nodes: result.Nodes, Accounts: accounts,
+ 		AccountPage: degradeAccountPageResponse{
+@@ -432,6 +432,7 @@ type degradeTotalsResponse struct {
+ 	Hard         int64   `json:"hard"`
+ 	Soft         int64   `json:"soft"`
+ 	Burst        int64   `json:"burst"`
++	Thinking     int64   `json:"thinking"`
+ 	MaxTPS       float64 `json:"maxTPS"`
+ }
+ 
+diff --git a/config.example.yaml b/config.example.yaml
+index 2fa23eb4..627df547 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -152,3 +152,6 @@ qualityGuard:
+     holdTimeout: 3s
+     minOutputTokens: 32
+     onExhausted: fail_closed # fail_open | fail_closed
++    # First missing-thinking hit cools the account; a later hit after the
++    # cooldown expires disables it.
++    accountCooldown: 24h
+diff --git a/frontend/src/features/quality-guard/degrade-accounts-panel.tsx b/frontend/src/features/quality-guard/degrade-accounts-panel.tsx
+index 8d269ff8..810d22dc 100644
+--- a/frontend/src/features/quality-guard/degrade-accounts-panel.tsx
++++ b/frontend/src/features/quality-guard/degrade-accounts-panel.tsx
+@@ -79,7 +79,7 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
+   return (
+     <div className="space-y-4">
+       <section className="grid overflow-hidden rounded-lg bg-card sm:grid-cols-2 xl:grid-cols-4" aria-label={t("qualityGuard.degrade.overview")}>
+-        <Metric icon={AlertTriangle} label={t("qualityGuard.degrade.hits")} value={String(data.totals.hits)} detail={t("qualityGuard.degrade.hitsHelp", { burst: data.totals.burst, soft: data.totals.soft, hard: data.totals.hard })} tone={data.totals.hits ? "bad" : "good"} />
++        <Metric icon={AlertTriangle} label={t("qualityGuard.degrade.hits")} value={String(data.totals.hits)} detail={t("qualityGuard.degrade.hitsHelp", { burst: data.totals.burst, soft: data.totals.soft, hard: data.totals.hard, thinking: data.totals.thinking })} tone={data.totals.hits ? "bad" : "good"} />
+         <Metric icon={Users} label={t("qualityGuard.degrade.accounts")} value={String(data.totals.accounts)} detail={t("qualityGuard.degrade.accountsHelp", { deleted: data.totals.deleted })} />
+         <Metric icon={PowerOff} label={t("qualityGuard.degrade.stillEnabled")} value={String(data.totals.stillEnabled)} detail={t("qualityGuard.degrade.stillEnabledHelp")} tone={data.totals.stillEnabled ? "bad" : "good"} />
+         <Metric icon={Gauge} label={t("qualityGuard.degrade.maxTPS")} value={Math.round(data.totals.maxTPS).toString()} detail={t("qualityGuard.degrade.maxTPSHelp")} tone={data.totals.maxTPS >= data.thresholds.hardTPS ? "bad" : undefined} />
+@@ -107,7 +107,7 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
+             </div>
+             <FilterSelect value={period} onChange={(value) => { setSelected(new Set()); setPage(1); setPeriod(value as DegradeWindow); }} items={[["1h", t("qualityGuard.degrade.windows.1h")], ["6h", t("qualityGuard.degrade.windows.6h")], ["24h", t("qualityGuard.degrade.windows.24h")], ["7d", t("qualityGuard.degrade.windows.7d")]]} />
+             <FilterSelect value={status} onChange={(value) => { setStatus(value as "all" | "enabled" | "disabled" | "deleted"); setPage(1); setSelected(new Set()); }} items={[["all", t("qualityGuard.degrade.statusAll")], ["enabled", t("qualityGuard.degrade.statusOn")], ["disabled", t("qualityGuard.degrade.statusOff")], ["deleted", t("qualityGuard.degrade.statusDeleted")]]} />
+-            <FilterSelect value={cls} onChange={(value) => { setCls(value as "all" | DegradeClass); setPage(1); setSelected(new Set()); }} items={[["all", t("qualityGuard.degrade.classAll")], ["buffered_burst", "burst"], ["soft_tps", "soft"], ["hard_tps", "hard"]]} />
++            <FilterSelect value={cls} onChange={(value) => { setCls(value as "all" | DegradeClass); setPage(1); setSelected(new Set()); }} items={[["all", t("qualityGuard.degrade.classAll")], ["missing_thinking", t("qualityGuard.degrade.classThinking")], ["buffered_burst", "burst"], ["soft_tps", "soft"], ["hard_tps", "hard"]]} />
+             <FilterSelect value={String(hitsMin)} onChange={(value) => { setHitsMin(Number(value)); setPage(1); setSelected(new Set()); }} items={[["1", t("qualityGuard.degrade.hitsAll")], ["2", t("qualityGuard.degrade.hitsMin", { count: 2 })], ["3", t("qualityGuard.degrade.hitsMin", { count: 3 })], ["5", t("qualityGuard.degrade.hitsMin", { count: 5 })], ["10", t("qualityGuard.degrade.hitsMin", { count: 10 })]]} />
+             <Button type="button" variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={selectedRows.length === 0 || busy} onClick={() => {
+               if (!window.confirm(t("qualityGuard.degrade.muteConfirm", { count: selectedRows.length }))) return;
+@@ -217,6 +217,7 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
+ 
+ function classSummary(classes: DegradeAccountDTO["classes"]) {
+   return [
++    classes.missing_thinking ? `thinking ${classes.missing_thinking}` : "",
+     classes.buffered_burst ? `burst ${classes.buffered_burst}` : "",
+     classes.soft_tps ? `soft ${classes.soft_tps}` : "",
+     classes.hard_tps ? `hard ${classes.hard_tps}` : "",
+@@ -224,6 +225,7 @@ function classSummary(classes: DegradeAccountDTO["classes"]) {
+ }
+ 
+ function classBadge(cls: DegradeClass) {
++  if (cls === "missing_thinking") return <Badge variant="outline" className="text-destructive">thinking</Badge>;
+   if (cls === "hard_tps") return <Badge variant="outline" className="text-destructive">hard</Badge>;
+   if (cls === "buffered_burst") return <Badge variant="outline" className="text-amber-600 dark:text-amber-400">burst</Badge>;
+   return <Badge variant="outline" className="text-muted-foreground">soft</Badge>;
+diff --git a/frontend/src/features/quality-guard/quality-guard-api.ts b/frontend/src/features/quality-guard/quality-guard-api.ts
+index f6a8cb95..39a49b4b 100644
+--- a/frontend/src/features/quality-guard/quality-guard-api.ts
++++ b/frontend/src/features/quality-guard/quality-guard-api.ts
+@@ -220,7 +220,7 @@ export function updateQualityGuardPolicy(policy: QualityGuardPolicy): Promise<{
+ }
+ 
+ export type DegradeWindow = "1h" | "6h" | "24h" | "7d";
+-export type DegradeClass = "buffered_burst" | "soft_tps" | "hard_tps";
++export type DegradeClass = "buffered_burst" | "soft_tps" | "hard_tps" | "missing_thinking";
+ 
+ export type DegradeAccountDTO = {
+   id: string;
+@@ -253,7 +253,7 @@ export type DegradeSummaryDTO = {
+   window: DegradeWindow;
+   generatedAt: string;
+   thresholds: { softTPS: number; hardTPS: number; minGenMs: number; minOutputTokens: number };
+-  totals: { hits: number; accounts: number; stillEnabled: number; disabled: number; deleted: number; hard: number; soft: number; burst: number; maxTPS: number };
++  totals: { hits: number; accounts: number; stillEnabled: number; disabled: number; deleted: number; hard: number; soft: number; burst: number; thinking: number; maxTPS: number };
+   series: { label: string; count: number; severe: number }[];
+   nodes: { name: string; hits: number; accounts: number; maxTPS: number }[];
+   accounts: DegradeAccountDTO[];
+@@ -261,13 +261,13 @@ export type DegradeSummaryDTO = {
+   events: DegradeEventDTO[];
+ };
+ 
+-const degradeClassValidator = isOneOf("buffered_burst", "soft_tps", "hard_tps");
++const degradeClassValidator = isOneOf("buffered_burst", "soft_tps", "hard_tps", "missing_thinking");
+ 
+ const decodeDegradeSummary = createObjectDecoder<DegradeSummaryDTO>("degrade accounts", {
+   window: isOneOf("1h", "6h", "24h", "7d"),
+   generatedAt: isString,
+   thresholds: hasShape({ softTPS: isNumber, hardTPS: isNumber, minGenMs: isNumber, minOutputTokens: isNumber }),
+-  totals: hasShape({ hits: isNumber, accounts: isNumber, stillEnabled: isNumber, disabled: isNumber, deleted: isNumber, hard: isNumber, soft: isNumber, burst: isNumber, maxTPS: isNumber }),
++  totals: hasShape({ hits: isNumber, accounts: isNumber, stillEnabled: isNumber, disabled: isNumber, deleted: isNumber, hard: isNumber, soft: isNumber, burst: isNumber, thinking: isNumber, maxTPS: isNumber }),
+   series: isArrayOf(hasShape({ label: isString, count: isNumber, severe: isNumber })),
+   nodes: isArrayOf(hasShape({ name: isString, hits: isNumber, accounts: isNumber, maxTPS: isNumber })),
+   accounts: isArrayOf(hasShape({
+diff --git a/frontend/src/shared/i18n/index.ts b/frontend/src/shared/i18n/index.ts
+index 0b1b3464..19168364 100644
+--- a/frontend/src/shared/i18n/index.ts
++++ b/frontend/src/shared/i18n/index.ts
+@@ -507,12 +507,12 @@ const resources = {
+         profileRequireThinkingHelp: "仅用于受控探针；输出达到 64 Token 但没有推理 Token 时判为硬异常。",
+         degrade: {
+           tab: "降智账号", overview: "降智账号概览", series: "降智时序", nodes: "按出口节点",
+-          hits: "降智次数", hitsHelp: "burst {{burst}} · soft {{soft}} · hard {{hard}}",
++          hits: "降智次数", hitsHelp: "思考换号 {{thinking}} · burst {{burst}} · soft {{soft}} · hard {{hard}}",
+           accounts: "涉及账号", accountsHelp: "窗口内去重 · 已删除 {{deleted}}", stillEnabled: "仍在调度", stillEnabledHelp: "漏网，可批量禁",
+           maxTPS: "峰值 TPS", maxTPSHelp: "单次请求最高",
+           accountsTitle: "降智账号", accountsHint: "显示 {{shown}} / {{total}}", accountsHintFiltered: "显示 {{shown}} / {{total}} · 命中≥{{min}}",
+           search: "搜名称 / 邮箱 / ID", statusAll: "全部状态", statusOn: "仍在调度", statusOff: "已禁用", statusDeleted: "账号已删除",
+-          classAll: "全部类型", class: "类型", account: "账号", status: "状态", hitCount: "命中",
++          classAll: "全部类型", classThinking: "思考换号", class: "类型", account: "账号", status: "状态", hitCount: "命中",
+           hitsAll: "全部次数", hitsMin: "命中 ≥ {{count}}",
+           windows: { "1h": "近 1 小时", "6h": "近 6 小时", "24h": "近 24 小时", "7d": "近 7 天" },
+           muteSelected: "禁用所选", muteSelectedCount: "禁用所选 ({{count}})", muteConfirm: "确认禁用 {{count}} 个仍在调度的降智账号？", muting: "正在禁用账号", muted: "已禁用 {{count}} 个账号", muteFailed: "禁用失败",
+@@ -1581,12 +1581,12 @@ const resources = {
+         profileExpectedHelp: "Leave empty to score throughput only.",
+         degrade: {
+           tab: "Degraded accounts", overview: "Degraded account overview", series: "Degrade timeline", nodes: "By egress node",
+-          hits: "Degrade hits", hitsHelp: "burst {{burst}} · soft {{soft}} · hard {{hard}}",
++          hits: "Degrade hits", hitsHelp: "thinking retry {{thinking}} · burst {{burst}} · soft {{soft}} · hard {{hard}}",
+           accounts: "Accounts", accountsHelp: "Unique in this window · {{deleted}} deleted", stillEnabled: "Still scheduled", stillEnabledHelp: "Still enabled; can be disabled in bulk",
+           maxTPS: "Peak TPS", maxTPSHelp: "Highest single request",
+           accountsTitle: "Degraded accounts", accountsHint: "Showing {{shown}} / {{total}}", accountsHintFiltered: "Showing {{shown}} / {{total}} · hits ≥ {{min}}",
+           search: "Search name / email / ID", statusAll: "All statuses", statusOn: "Still scheduled", statusOff: "Disabled", statusDeleted: "Deleted accounts",
+-          classAll: "All classes", class: "Class", account: "Account", status: "Status", hitCount: "Hits",
++          classAll: "All classes", classThinking: "Thinking retry", class: "Class", account: "Account", status: "Status", hitCount: "Hits",
+           hitsAll: "Any hit count", hitsMin: "Hits ≥ {{count}}",
+           windows: { "1h": "Last 1 hour", "6h": "Last 6 hours", "24h": "Last 24 hours", "7d": "Last 7 days" },
+           muteSelected: "Disable selected", muteSelectedCount: "Disable selected ({{count}})", muteConfirm: "Disable {{count}} still-scheduled degraded accounts?", muting: "Disabling accounts", muted: "Disabled {{count}} accounts", muteFailed: "Failed to disable accounts",
+-- 
+2.50.1 (Apple Git-155)
+

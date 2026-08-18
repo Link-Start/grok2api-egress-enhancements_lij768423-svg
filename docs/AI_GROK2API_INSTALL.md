@@ -123,8 +123,8 @@ cd ~/grok-stack/grok2api
 cp config.example.yaml config.yaml
 ```
 
-这个 fork 的 `main` 已经叠了 live 18182 同款四个补丁（#956–#959）。  
-**必须 `--build` 本仓库镜像。** `pull ghcr.io/chenyme/grok2api:latest` 会丢掉缺 thinking 扣住换号、搬号上限和 compact 修复。
+这个 fork 的 `main` 已经叠了 live 18182 同款补丁（#956–#959 + #966）。  
+**必须 `--build` 本仓库镜像。** `pull ghcr.io/chenyme/grok2api:latest` 会丢掉缺 thinking 扣住换号、24h 冷却/再犯禁用、搬号上限和 compact 修复。
 
 `config.yaml`：
 
@@ -155,6 +155,7 @@ qualityGuard:
     holdTimeout: 3s
     minOutputTokens: 32
     onExhausted: fail_closed
+    accountCooldown: 24h
 ```
 
 Compose（编本地 fork，不要 pull 官方 latest）：

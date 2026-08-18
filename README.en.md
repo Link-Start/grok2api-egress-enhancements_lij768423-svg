@@ -28,10 +28,10 @@ This is an unofficial enhancement distribution for [chenyme/grok2api](https://gi
 Current baseline:
 
 - Upstream release: `v3.1.3` / `main` `57746fc7` (quality guard and thinking guard are already upstream)
-- Today's delta: request-path withhold + account retry (do not deliver missing-thinking streams; up to 5 account switches; 503 if all miss)
-- Patch file: `patches/0006-feat-request-quality-hold-retry.patch` (on current official `main`)
-- Upstream PR: [chenyme/grok2api#959](https://github.com/chenyme/grok2api/pull/959)
-- Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `feat/request-quality-hold-retry`
+- Today's delta: 24h missing-thinking cooldown, second-strike disable, and degrade-accounts `missing_thinking` list
+- Patch file: `patches/0010-feat-missing-thinking-cooldown-and-degrade-list.patch` (on current official `main` after #959)
+- Upstream PR: [chenyme/grok2api#966](https://github.com/chenyme/grok2api/pull/966)
+- Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`
 
 If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` (closed [#837](https://github.com/chenyme/grok2api/pull/837)).
 
@@ -42,6 +42,7 @@ If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-ad
 - Buffer thinking-model SSE until reasoning appears, or enough visible output arrives with none.
 - Missing thinking (`output ≥ 32`, `reasoning=0`) is **not delivered**. Another account is tried.
 - Up to 6 attempts (first + 5 switches). All misses → `503 quality_degraded`.
+- First miss: 24h scheduling cooldown (`accountCooldown`). A later miss after that cooldown disables the account.
 - Off by default: `qualityGuard.requestRetry.enabled: false`.
 
 ### Immediate fixed-proxy recovery

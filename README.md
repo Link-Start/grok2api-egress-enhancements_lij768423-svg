@@ -28,17 +28,18 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 
 这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，以及当前生产在跑的 **Quality Guard sidecar**（管理页 `/quality-guard`）。仓库不复制上游完整源码。
 
-当前补丁基于官方 `v3.1.3` / `57746fc7`。**四个 live 补丁都在本仓，可运行树是 fork：**
+当前补丁基于官方 `main`（含 #959）。**可运行树是 fork：**
 
 | 能力 | 本仓代码 | 上游 PR | 别人怎么用到 |
 | --- | --- | --- | --- |
-| 缺 thinking 扣住换号 | `patches/0006-*.patch` | [#959](https://github.com/chenyme/grok2api/pull/959) | clone **fork** 再 `--build` |
+| 缺 thinking 冷却 24h / 再犯禁用 + 降智列表 | `patches/0010-*.patch` | [#966](https://github.com/chenyme/grok2api/pull/966) | clone **fork** 再 `--build` |
+| 缺 thinking 扣住换号 | `patches/0006-*.patch` | [#959](https://github.com/chenyme/grok2api/pull/959) | 同上（官方已合） |
 | compact 漂移仍留摘要 | `patches/0007-*.patch` | [#956](https://github.com/chenyme/grok2api/pull/956) | 同上 |
 | 搬号 30%/10% 上限 | `patches/0008-*.patch` | [#957](https://github.com/chenyme/grok2api/pull/957) | 同上 |
 | sidecar 认 `GROK2API_BASE_URL` | `patches/0009-*.patch` + `sidecar/quality_guard.py` | [#958](https://github.com/chenyme/grok2api/pull/958) | 同上 |
 
-四个都是 **Grok2API 网关 / sidecar** 代码，不是 CPA 插件。插件 `.so` 没有这四项。  
-0006 和 0008 都改 `config.go`，不要指望在官方树上 `git am` 四个无冲突。直接用 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`。
+这些都是 **Grok2API 网关 / sidecar** 代码，不是 CPA 插件。插件 `.so` 没有这些项。  
+0006 / 0008 / 0010 都改 `config.go`，不要指望在官方树上 `git am` 无冲突。直接用 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`。
 
 仍停在 `v3.0.11` 时，继续使用遗留补丁 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`（对应已关闭的 [#837](https://github.com/chenyme/grok2api/pull/837)）。
 
@@ -80,8 +81,9 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 - 思考模型流式请求在写出给用户前先扣住：看到 `thinking_content` / reasoning 再放行。
 - 可见输出 ≥ 32 且 reasoning=0 记为降智，**不发给用户**，换账号再打。
 - 最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503 quality_degraded`，不再 `deliver_last`。
+- 第一次缺思考：账号冷却 24h（`accountCooldown`），仍启用。24h 后再缺思考：立刻禁用。
 - 默认关闭：`qualityGuard.requestRetry.enabled: false`。
-- 审计：`error_code=quality_degraded`。网关日志：`quality_degraded_retry` / `quality_degraded_rejected`。
+- 审计：`error_code=quality_degraded`。网关日志：`quality_degraded_retry` / `quality_degraded_rejected` / `quality_degraded_cooldown` / `quality_degraded_disabled`。
 
 ### 探针方案（v3.1.2+ 增量）
 
@@ -92,7 +94,7 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 
 ### 降智账号面板（v3.1.2 增量）
 
-- 质量守护页增加「降智账号」页签：按请求审计把用户流式请求（不含 quality-test 探针）归类为 `buffered_burst` / `soft_tps` / `hard_tps`。
+- 质量守护页增加「降智账号」页签：按请求审计把用户流式请求（不含 quality-test 探针）归类为 `buffered_burst` / `soft_tps` / `hard_tps` / `missing_thinking`（思考换号）。
 - 口径与面板一致：`outputTokens * 1000 / (durationMs - firstTokenMs)`，默认 soft 500、hard 1000；生成窗口短于 1s 且达到 soft 记为 `buffered_burst`。
 - 支持 1h / 6h / 24h / 7d 窗口，按邮箱/ID、调度状态、类型、命中次数筛选。
 - 时序条从底部堆叠；任意行可勾选，批量「禁掉所选」或「解除禁用」，走现有账号 batch API（`ids` 为字符串）。

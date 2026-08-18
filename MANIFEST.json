@@ -4,8 +4,16 @@
   "upstream_tag": "v3.1.3",
   "upstream_commit": "57746fc70289fcbab4bf33db33c521cf756ebbb9",
   "runnable_fork": "https://github.com/lij768423-svg/grok2api",
-  "runnable_note": "Fork main = official main + #956 #957 #958 #959. Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
+  "runnable_note": "Fork main = official main + missing-thinking 24h cooldown / second-strike disable + degrade-accounts thinking list (#966). Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
   "patches": [
+    {
+      "id": "0010",
+      "file": "patches/0010-feat-missing-thinking-cooldown-and-degrade-list.patch",
+      "sha256": "18cd40741bb2ca033774b0028af610015bd567534a93696ae5d9b97a8b8c1c10",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/966",
+      "patch_commit": "52addf90df1dce9345b66dd28afd3a5f285d2ef9",
+      "implements": "24h missing-thinking cooldown, second-strike disable, degrade-accounts thinking list"
+    },
     {
       "id": "0006",
       "file": "patches/0006-feat-request-quality-hold-retry.patch",
@@ -40,7 +48,7 @@
       "also_in": "sidecar/quality_guard.py"
     }
   ],
-  "applies_on": "chenyme/grok2api v3.1.3 / 57746fc7 (independent PRs; 0006 and 0008 both touch config.go — use the fork if you need all four)",
+  "applies_on": "chenyme/grok2api current main (a4b33d47+). 0010 applies on official main after #959. Prefer the fork if you want 0006–0010 together.",
   "previous": {
     "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
     "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",
