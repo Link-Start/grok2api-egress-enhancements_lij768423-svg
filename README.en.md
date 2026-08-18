@@ -28,7 +28,7 @@ This is an unofficial enhancement distribution for [chenyme/grok2api](https://gi
 Current baseline:
 
 - Upstream release: `v3.1.3` / `main` `57746fc7` (quality guard and thinking guard are already upstream)
-- Today's delta: empty hold / idle no longer fail-open as HTTP 200 (`patches/0012-*.patch`, [#968](https://github.com/chenyme/grok2api/pull/968)); TUI compaction hold skip remains `0011` / [#967](https://github.com/chenyme/grok2api/pull/967)
+- Today's delta: abort `response.incomplete` now includes `id` / `created_at` / `sequence_number` (`patches/0013-*.patch`, [#968](https://github.com/chenyme/grok2api/pull/968)) so Grok CLI does not serde-fail with `missing field id`
 - Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`
 
 If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` (closed [#837](https://github.com/chenyme/grok2api/pull/837)).
