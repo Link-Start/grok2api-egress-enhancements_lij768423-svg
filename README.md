@@ -32,7 +32,8 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 
 | 能力 | 本仓代码 | 上游 PR | 别人怎么用到 |
 | --- | --- | --- | --- |
-| TUI 压缩不当无思考 | `patches/0011-*.patch` | [#967](https://github.com/chenyme/grok2api/pull/967) | clone **fork** 再 `--build` |
+| 空 hold / idle 不再 fail-open 成 200 | `patches/0012-*.patch` | [#968](https://github.com/chenyme/grok2api/pull/968) | clone **fork** 再 `--build` |
+| TUI 压缩不当无思考 | `patches/0011-*.patch` | [#967](https://github.com/chenyme/grok2api/pull/967) | 同上 |
 | 缺 thinking 冷却 24h / 再犯禁用 + 降智列表 | `patches/0010-*.patch` | [#966](https://github.com/chenyme/grok2api/pull/966) | 同上 |
 | 缺 thinking 扣住换号 | `patches/0006-*.patch` | [#959](https://github.com/chenyme/grok2api/pull/959) | 同上（官方已合） |
 | compact 漂移仍留摘要 | `patches/0007-*.patch` | [#956](https://github.com/chenyme/grok2api/pull/956) | 同上 |
@@ -40,7 +41,7 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 | sidecar 认 `GROK2API_BASE_URL` | `patches/0009-*.patch` + `sidecar/quality_guard.py` | [#958](https://github.com/chenyme/grok2api/pull/958) | 同上 |
 
 这些都是 **Grok2API 网关 / sidecar** 代码，不是 CPA 插件。插件 `.so` 没有这些项。  
-0006 / 0008 / 0010 都改 `config.go`，不要指望在官方树上 `git am` 无冲突。直接用 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`。
+0006 / 0008 / 0010 都改 `config.go`，不要指望在官方树上 `git am` 无冲突。直接用 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`（含 0012）。
 
 仍停在 `v3.0.11` 时，继续使用遗留补丁 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`（对应已关闭的 [#837](https://github.com/chenyme/grok2api/pull/837)）。
 
@@ -84,7 +85,8 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 - 最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503 quality_degraded`，不再 `deliver_last`。
 - 第一次缺思考：账号冷却 24h（`accountCooldown`），仍启用。24h 后再缺思考：立刻禁用。
 - 默认关闭：`qualityGuard.requestRetry.enabled: false`。
-- 审计：`error_code=quality_degraded`。网关日志：`quality_degraded_retry` / `quality_degraded_rejected` / `quality_degraded_cooldown` / `quality_degraded_disabled`。
+- 0 token 的 hold 超时不再 fail-open。上游 idle 换号并 24h 冷却该号；若已经写出 200，补 SSE error + `[DONE]`，避免 Sub2API 把无终止事件的流打成 500。
+- 审计：`error_code=quality_degraded`。网关日志：`quality_degraded_retry` / `quality_degraded_rejected` / `quality_degraded_cooldown` / `quality_degraded_disabled` / `quality_peek_idle_retry`。
 
 ### 探针方案（v3.1.2+ 增量）
 

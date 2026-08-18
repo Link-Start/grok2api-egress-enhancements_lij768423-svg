@@ -4,8 +4,16 @@
   "upstream_tag": "v3.1.3",
   "upstream_commit": "57746fc70289fcbab4bf33db33c521cf756ebbb9",
   "runnable_fork": "https://github.com/lij768423-svg/grok2api",
-  "runnable_note": "Fork main = official main + missing-thinking 24h cooldown / second-strike disable + degrade-accounts thinking list (#966) + TUI compaction hold skip. Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
+  "runnable_note": "Fork main = official main + missing-thinking 24h cooldown / second-strike disable + degrade-accounts thinking list (#966) + TUI compaction hold skip (#967) + empty-hold idle SSE terminal (#968). Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
   "patches": [
+    {
+      "id": "0012",
+      "file": "patches/0012-fix-empty-hold-idle-sse.patch",
+      "sha256": "9e5c9415752ebde0fc6ffdde6a09674f03e272611fec32a1eea77dac67cfc7c4",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/968",
+      "patch_commit": "89a33056c24f588de62fd3b713c22b6e15c934f3",
+      "implements": "do not fail-open empty held streams; idle retries with SSE terminal event"
+    },
     {
       "id": "0011",
       "file": "patches/0011-fix-skip-tui-compaction-quality-hold.patch",
@@ -56,7 +64,7 @@
       "also_in": "sidecar/quality_guard.py"
     }
   ],
-  "applies_on": "chenyme/grok2api current main (a4b33d47+). 0010 and 0011 apply on official main after #959. Prefer the fork if you want 0006–0011 together.",
+  "applies_on": "chenyme/grok2api current main (a4b33d47+). 0010–0012 apply on official main after #959. Prefer the fork if you want 0006–0012 together.",
   "previous": {
     "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
     "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",
