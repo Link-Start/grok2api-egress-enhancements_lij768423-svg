@@ -1,0 +1,124 @@
+From 08f732bab2b2f67d633c59b81e4b6a15eae099de Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Mon, 17 Aug 2026 22:20:01 +0800
+Subject: [PATCH] fix: honor GROK2API_BASE_URL in quality-guard sidecar
+
+The sidecar default remains http://grok2api:8000 for Compose DNS.
+Override the env when the main service is renamed or published on host
+networking.
+---
+ docker-compose.yml                            |  4 +++
+ tools/egress-quality-guard/README.md          |  5 +++
+ tools/egress-quality-guard/README.zh-CN.md    |  2 ++
+ tools/egress-quality-guard/quality_guard.py   |  2 +-
+ .../quality_guard_test.py                     | 31 +++++++++++++++++++
+ 5 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/docker-compose.yml b/docker-compose.yml
+index e11f0fb..b6bb7ad 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -62,6 +62,10 @@ services:
+     build:
+       context: .
+       dockerfile: tools/egress-quality-guard/Dockerfile
++    environment:
++      # Default matches the Compose service name. Override for host networking
++      # or a renamed grok2api service, e.g. http://127.0.0.1:8000
++      GROK2API_BASE_URL: ${GROK2API_BASE_URL:-http://grok2api:8000}
+     depends_on:
+       grok2api:
+         condition: service_healthy
+diff --git a/tools/egress-quality-guard/README.md b/tools/egress-quality-guard/README.md
+index 531d338..8daa126 100644
+--- a/tools/egress-quality-guard/README.md
++++ b/tools/egress-quality-guard/README.md
+@@ -185,6 +185,11 @@ After changing the base `qualityGuard` settings in `config.yaml`, run
+ so the main service regenerates the bootstrap. Policy changes saved in the
+ admin page still hot-reload without a restart.
+ 
++The sidecar talks to grok2api at `GROK2API_BASE_URL`, which defaults to
++`http://grok2api:8000` on the Compose network. Set it when the main service is
++renamed or published on host networking, for example
++`GROK2API_BASE_URL=http://127.0.0.1:8000`.
++
+ Verify the managed nodes, model, and minimum healthy-node count before leaving
+ the sidecar running. Never commit the state volume or
+ production logs.
+diff --git a/tools/egress-quality-guard/README.zh-CN.md b/tools/egress-quality-guard/README.zh-CN.md
+index af6dab6..ea9211a 100644
+--- a/tools/egress-quality-guard/README.zh-CN.md
++++ b/tools/egress-quality-guard/README.zh-CN.md
+@@ -130,6 +130,8 @@ docker compose --profile quality-guard up -d --build
+ 以后修改 `config.yaml` 中的 `qualityGuard` 基础配置时，执行
+ `docker compose --profile quality-guard restart grok2api egress-quality-guard` 让主程序重新生成 bootstrap。管理页面保存的运行策略仍会热加载，无需重启。
+ 
++sidecar 通过 `GROK2API_BASE_URL` 访问主程序，Compose 网络默认是 `http://grok2api:8000`。主服务改名或使用 host 网络时需要覆盖，例如 `GROK2API_BASE_URL=http://127.0.0.1:8000`。
++
+ 先确认受管节点、模型和最低健康节点数正确，再允许 sidecar 长期运行。不要提交状态卷或生产日志。只停止守护程序可执行
+ `docker compose --profile quality-guard stop egress-quality-guard`，不会影响主 API。
+ 
+diff --git a/tools/egress-quality-guard/quality_guard.py b/tools/egress-quality-guard/quality_guard.py
+index a0eac94..073508f 100755
+--- a/tools/egress-quality-guard/quality_guard.py
++++ b/tools/egress-quality-guard/quality_guard.py
+@@ -106,7 +106,7 @@ class Config:
+         node_ids = tuple(dict.fromkeys(str(value).strip() for value in values.get("node_ids", []) if str(value).strip()))
+         rotatable_node_ids = tuple(dict.fromkeys(str(value).strip() for value in values.get("rotatable_node_ids", []) if str(value).strip()))
+         config = cls(
+-            base_url="http://grok2api:8000",
++            base_url=os.environ.get("GROK2API_BASE_URL", "http://grok2api:8000").rstrip("/"),
+             internal_token=token,
+             model=str(values.get("model") or "").strip(),
+             node_ids=node_ids,
+diff --git a/tools/egress-quality-guard/quality_guard_test.py b/tools/egress-quality-guard/quality_guard_test.py
+index 0b5a45f..af261f6 100644
+--- a/tools/egress-quality-guard/quality_guard_test.py
++++ b/tools/egress-quality-guard/quality_guard_test.py
+@@ -1,5 +1,6 @@
+ import importlib.util
+ import json
++import os
+ import stat
+ import sys
+ import tempfile
+@@ -228,6 +229,36 @@ class ConfigTests(unittest.TestCase):
+             }), encoding="utf-8")
+             loaded = quality_guard.Config.from_bootstrap(path)
+             self.assertEqual((loaded.node_ids, loaded.internal_token), (("2", "9"), "scoped-secret"))
++            self.assertEqual(loaded.base_url, "http://grok2api:8000")
++
++    def test_bootstrap_honors_grok2api_base_url(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "bootstrap.json"
++            path.write_text(json.dumps({
++                "version": 1,
++                "enabled": True,
++                "internal_token": "scoped-secret",
++                "config": {
++                    "model": "grok-4.5", "node_ids": ["2"], "mode": "hybrid",
++                    "prompt": "probe", "expected": "QUALITY_OK",
++                    "active_interval_seconds": 1800, "passive_poll_seconds": 5,
++                    "soft_tps": 500, "hard_tps": 1000, "consecutive_soft": 2, "consecutive_errors": 2,
++                    "quarantine_seconds": 300, "no_account_backoff_seconds": 300,
++                    "min_healthy_nodes": 1, "max_output_tokens": 384, "fail_closed": False,
++                    "min_generation_ms": 1000, "rotation_url": "", "rotation_token": "",
++                    "rotation_timeout_seconds": 45, "rotatable_node_ids": [],
++                },
++            }), encoding="utf-8")
++            previous = os.environ.get("GROK2API_BASE_URL")
++            os.environ["GROK2API_BASE_URL"] = "http://127.0.0.1:18182/"
++            try:
++                loaded = quality_guard.Config.from_bootstrap(path)
++            finally:
++                if previous is None:
++                    os.environ.pop("GROK2API_BASE_URL", None)
++                else:
++                    os.environ["GROK2API_BASE_URL"] = previous
++            self.assertEqual(loaded.base_url, "http://127.0.0.1:18182")
+ 
+     def test_disabled_bootstrap_exits_cleanly(self):
+         with tempfile.TemporaryDirectory() as directory:
+-- 
+2.50.1 (Apple Git-155)
+

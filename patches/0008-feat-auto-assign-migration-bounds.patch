@@ -1,0 +1,449 @@
+From ae05b4f749443969d554a9b2c6954328286d5807 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Mon, 17 Aug 2026 22:20:01 +0800
+Subject: [PATCH] feat: bound auto-assign share and per-cycle migrations
+
+Add optional routing.autoAssignMaxNodeShare and
+autoAssignMaxMigrationShare. Default 0 keeps the historical unbounded
+first-pass evacuation and the existing 200-move repair ceiling. Values
+in [0.05, 1] cap how many active accounts one healthy node may absorb
+and how many already-bound accounts may move in one cycle.
+---
+ README.md                                     |   1 +
+ README.zh-CN.md                               |   1 +
+ backend/internal/app/application.go           |   2 +
+ .../internal/application/egress/assignment.go | 108 +++++++++++++++++-
+ .../egress/assignment_bounds_test.go          |  81 +++++++++++++
+ .../internal/application/egress/service.go    |  28 ++---
+ backend/internal/infra/config/config.go       |  19 +++
+ backend/internal/infra/config/config_test.go  |  16 +++
+ config.example.yaml                           |   8 ++
+ 9 files changed, 249 insertions(+), 15 deletions(-)
+ create mode 100644 backend/internal/application/egress/assignment_bounds_test.go
+
+diff --git a/README.md b/README.md
+index ca3eda9..a6c9136 100644
+--- a/README.md
++++ b/README.md
+@@ -427,6 +427,7 @@ Important optional settings:
+ - `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
+ - `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
+ - `routing.segmentedSelectorEnabled`: enabled by default for pools with at least 3,000 eligible accounts; bounds dynamic concurrency reads while retaining quota/tier priorities, sticky sessions, full-planner fallback, and atomic guards.
++- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`: optional large-pool guards. `0` (default) keeps the historical unbounded first-pass evacuation and the existing 200-move ceiling for capacity/rebalance repair. Set `0.05`–`1` only when a quarantined node would otherwise dump thousands of auto accounts onto the last healthy exits. `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` and `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` override the YAML when set.
+ - Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
+ - **Sync latest version** applies the validated Grok Build client version and User-Agent.
+ 
+diff --git a/README.zh-CN.md b/README.zh-CN.md
+index 7b81395..713e66e 100644
+--- a/README.zh-CN.md
++++ b/README.zh-CN.md
+@@ -418,6 +418,7 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
+ - `audit.ledgerMode`：`observe` 仅报告账本故障；`enforce` 可暂停新推理以保护计费准确性。
+ - `routing.accountIsolatedConnections`：为外部 L4 或按连接哈希的负载均衡器按账号拆分出站 TCP/HTTP 连接池。默认关闭，因为会增加连接数、TLS 握手、内存和文件描述符占用。
+ - `routing.segmentedSelectorEnabled`：默认对至少 3000 个可用账号的大号池启用，限制动态并发读取规模，同时保留额度/等级优先级、会话粘性、完整选号回退与原子门禁。
++- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`：可选的大号池保护。`0`（默认）保持历史行为：不健康节点上的 auto 账号会一次性迁走，容量/再均衡仍最多 200 次。仅在隔离一个节点会把大量账号压到最后几个健康出口时，才设为 `0.05`–`1`。环境变量 `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` 与 `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` 可覆盖 YAML。
+ - Build 响应头超时和精确匹配的 403 失效规则支持热加载。
+ - “同步最新版本”可应用已验证的 Grok Build 客户端版本和 User-Agent。
+ 
+diff --git a/backend/internal/app/application.go b/backend/internal/app/application.go
+index 9d49bcd..6c578be 100644
+--- a/backend/internal/app/application.go
++++ b/backend/internal/app/application.go
+@@ -309,6 +309,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
+ 	accountSyncService.SetBulkPool(importPool)
+ 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
+ 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, accountRepo)
++	egressService.ConfigureAutoAssignBounds(cfg.Routing.AutoAssignMaxNodeShare, cfg.Routing.AutoAssignMaxMigrationShare)
+ 	egressService.SetClearanceManager(egressManager)
+ 	egressService.SetNodeProber(egressManager)
+ 	egressService.SetOperationsConfigInvalidator(egressManager)
+@@ -401,6 +402,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
+ 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
+ 		selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
+ 		selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
++		egressService.ConfigureAutoAssignBounds(next.Routing.AutoAssignMaxNodeShare, next.Routing.AutoAssignMaxMigrationShare)
+ 		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+ 		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+ 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
+diff --git a/backend/internal/application/egress/assignment.go b/backend/internal/application/egress/assignment.go
+index 0abb1e0..5a1452a 100644
+--- a/backend/internal/application/egress/assignment.go
++++ b/backend/internal/application/egress/assignment.go
+@@ -3,7 +3,11 @@ package egress
+ import (
+ 	"context"
+ 	"errors"
++	"math"
++	"os"
+ 	"sort"
++	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+@@ -67,6 +71,10 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
+ 	if len(nodes) == 0 {
+ 		return RebalanceResult{Unplaced: countAutoAssignable(accounts, autoAssign, autoBalance)}, nil
+ 	}
++	nodeShare, migrationShare := s.autoAssignBounds()
++	nodes = capAutomaticAssignmentShare(nodes, accounts, nodeShare)
++	migrationLimit := autoAssignmentMigrationLimit(accounts, migrationShare)
++	migrations := 0
+ 	loads := make(map[uint64]int, len(nodes))
+ 	byID := make(map[uint64]domain.Node, len(nodes))
+ 	for _, node := range nodes {
+@@ -95,6 +103,11 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
+ 		if credential.EgressNodeID == 0 && !autoAssign {
+ 			continue
+ 		}
++		if credential.EgressNodeID != 0 && migrationLimit >= 0 && migrations >= migrationLimit {
++			// Keep the remaining accounts bound until the next cycle instead of
++			// evacuating an entire unhealthy node in one burst.
++			continue
++		}
+ 		target, found := leastLoadedNode(nodes, loads)
+ 		if !found {
+ 			result.Unplaced++
+@@ -106,6 +119,7 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
+ 		if credential.EgressNodeID == 0 {
+ 			result.Assigned++
+ 		} else {
++			migrations++
+ 			result.Rebalanced++
+ 		}
+ 	}
+@@ -114,8 +128,12 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
+ 	// Repair automatic assignments that became over capacity even when ordinary
+ 	// load balancing is disabled. Manual assignments remain immovable.
+ 	moves := 0
++	capacityMoveLimit := maxAutomaticReassignments
++	if migrationLimit >= 0 {
++		capacityMoveLimit = min(maxAutomaticReassignments, max(0, migrationLimit-migrations))
++	}
+ 	blockedCapacitySources := make(map[uint64]bool)
+-	for moves < maxAutomaticReassignments {
++	for moves < capacityMoveLimit {
+ 		source, destination, found := overCapacityPair(nodes, loads, blockedCapacitySources)
+ 		if !found {
+ 			break
+@@ -135,7 +153,7 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
+ 
+ 	if autoBalance {
+ 		blocked := make(map[uint64]bool)
+-		for moves < maxAutomaticReassignments {
++		for moves < capacityMoveLimit {
+ 			source, destination, found := rebalancePair(nodes, loads, blocked)
+ 			if !found {
+ 				break
+@@ -170,6 +188,92 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
+ 	return result, nil
+ }
+ 
++// capAutomaticAssignmentShare optionally prevents a cascading node quarantine
++// from concentrating the whole active provider pool on the last healthy node.
++// share <= 0 leaves configured node capacities unchanged.
++func capAutomaticAssignmentShare(nodes []domain.Node, accounts []accountdomain.Credential, share float64) []domain.Node {
++	if share <= 0 {
++		return nodes
++	}
++	active := activeAccountCount(accounts)
++	if active == 0 {
++		return nodes
++	}
++	maxPerNode := max(1, int(math.Ceil(float64(active)*share)))
++	for index := range nodes {
++		configured := nodes[index].AccountCapacity
++		if configured <= 0 || configured > maxPerNode {
++			nodes[index].AccountCapacity = maxPerNode
++		}
++	}
++	return nodes
++}
++
++// autoAssignmentMigrationLimit returns the per-cycle move budget when share is
++// enabled. A negative result means the first-pass evacuation stays unbounded
++// and later capacity/rebalance loops keep the existing 200-move ceiling.
++func autoAssignmentMigrationLimit(accounts []accountdomain.Credential, share float64) int {
++	if share <= 0 {
++		return -1
++	}
++	return max(1, int(math.Ceil(float64(activeAccountCount(accounts))*share)))
++}
++
++func activeAccountCount(accounts []accountdomain.Credential) int {
++	active := 0
++	for _, credential := range accounts {
++		if credential.Enabled && credential.AuthStatus == accountdomain.AuthStatusActive {
++			active++
++		}
++	}
++	return active
++}
++
++func (s *Service) ConfigureAutoAssignBounds(maxNodeShare, maxMigrationShare float64) {
++	if s == nil {
++		return
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.autoAssignMaxNodeShare = normalizeAutoAssignShare(maxNodeShare)
++	s.autoAssignMaxMigrationShare = normalizeAutoAssignShare(maxMigrationShare)
++}
++
++func (s *Service) autoAssignBounds() (nodeShare, migrationShare float64) {
++	if s == nil {
++		return 0, 0
++	}
++	s.mu.RLock()
++	configuredNode, configuredMigration := s.autoAssignMaxNodeShare, s.autoAssignMaxMigrationShare
++	s.mu.RUnlock()
++	return resolveAutoAssignShare("GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE", configuredNode),
++		resolveAutoAssignShare("GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE", configuredMigration)
++}
++
++func resolveAutoAssignShare(envName string, configured float64) float64 {
++	if raw, ok := os.LookupEnv(envName); ok {
++		if parsed, valid := parseAutoAssignShare(raw); valid {
++			return parsed
++		}
++	}
++	return normalizeAutoAssignShare(configured)
++}
++
++func parseAutoAssignShare(raw string) (float64, bool) {
++	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
++	if err != nil || value < 0 || value > 1 || (value > 0 && value < 0.05) {
++		return 0, false
++	}
++	return value, true
++}
++
++func normalizeAutoAssignShare(value float64) float64 {
++	if value <= 0 || value > 1 || (value > 0 && value < 0.05) {
++		return 0
++	}
++	return value
++}
++
+ func (s *Service) eligibleNodesForProvider(values []domain.Node, provider accountdomain.Provider, probeInterval time.Duration, now time.Time) []domain.Node {
+ 	values = append([]domain.Node(nil), values...)
+ 	result := make([]domain.Node, 0, len(values))
+diff --git a/backend/internal/application/egress/assignment_bounds_test.go b/backend/internal/application/egress/assignment_bounds_test.go
+new file mode 100644
+index 0000000..d55104a
+--- /dev/null
++++ b/backend/internal/application/egress/assignment_bounds_test.go
+@@ -0,0 +1,81 @@
++package egress
++
++import (
++	"testing"
++
++	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
++	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
++)
++
++func TestNormalizeAndParseAutoAssignShare(t *testing.T) {
++	if got := normalizeAutoAssignShare(0); got != 0 {
++		t.Fatalf("zero must stay off: %v", got)
++	}
++	if got := normalizeAutoAssignShare(0.03); got != 0 {
++		t.Fatalf("below 0.05 must stay off: %v", got)
++	}
++	if got := normalizeAutoAssignShare(1.2); got != 0 {
++		t.Fatalf("above 1 must stay off: %v", got)
++	}
++	if got := normalizeAutoAssignShare(0.3); got != 0.3 {
++		t.Fatalf("valid share = %v", got)
++	}
++	if _, ok := parseAutoAssignShare("0"); !ok {
++		t.Fatal("explicit 0 is a valid env override")
++	}
++	if _, ok := parseAutoAssignShare("0.03"); ok {
++		t.Fatal("0.03 must be rejected so YAML/default remains")
++	}
++	if value, ok := parseAutoAssignShare("0.10"); !ok || value != 0.10 {
++		t.Fatalf("0.10 = %v %v", value, ok)
++	}
++}
++
++func TestCapAutomaticAssignmentShareDisabledByDefault(t *testing.T) {
++	nodes := []domain.Node{{ID: 1, AccountCapacity: 0}, {ID: 2, AccountCapacity: 40}}
++	accounts := makeActiveAccounts(20)
++	got := capAutomaticAssignmentShare(nodes, accounts, 0)
++	if got[0].AccountCapacity != 0 || got[1].AccountCapacity != 40 {
++		t.Fatalf("disabled share must not rewrite capacities: %#v", got)
++	}
++}
++
++func TestCapAutomaticAssignmentShareAppliesFraction(t *testing.T) {
++	nodes := []domain.Node{{ID: 1, AccountCapacity: 0}, {ID: 2, AccountCapacity: 40}}
++	accounts := makeActiveAccounts(100)
++	got := capAutomaticAssignmentShare(nodes, accounts, 0.30)
++	if got[0].AccountCapacity != 30 {
++		t.Fatalf("uncapped node should absorb at most 30: %#v", got[0])
++	}
++	if got[1].AccountCapacity != 30 {
++		t.Fatalf("configured 40 should be lowered to 30: %#v", got[1])
++	}
++}
++
++func TestAutoAssignmentMigrationLimitPreservesHistoricalCeilingWhenOff(t *testing.T) {
++	if got := autoAssignmentMigrationLimit(makeActiveAccounts(5000), 0); got != -1 {
++		t.Fatalf("disabled share must leave first-pass unbounded: %d", got)
++	}
++	if got := autoAssignmentMigrationLimit(makeActiveAccounts(100), 0.10); got != 10 {
++		t.Fatalf("10%% of 100 active accounts = %d", got)
++	}
++}
++
++func TestResolveAutoAssignSharePrefersValidEnv(t *testing.T) {
++	t.Setenv("GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE", "0.25")
++	if got := resolveAutoAssignShare("GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE", 0); got != 0.25 {
++		t.Fatalf("env should override disabled YAML: %v", got)
++	}
++	t.Setenv("GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE", "nope")
++	if got := resolveAutoAssignShare("GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE", 0.4); got != 0.4 {
++		t.Fatalf("invalid env should fall back to YAML: %v", got)
++	}
++}
++
++func makeActiveAccounts(n int) []accountdomain.Credential {
++	accounts := make([]accountdomain.Credential, n)
++	for i := range accounts {
++		accounts[i] = accountdomain.Credential{Enabled: true, AuthStatus: accountdomain.AuthStatusActive}
++	}
++	return accounts
++}
+diff --git a/backend/internal/application/egress/service.go b/backend/internal/application/egress/service.go
+index 308f024..830a65e 100644
+--- a/backend/internal/application/egress/service.go
++++ b/backend/internal/application/egress/service.go
+@@ -104,19 +104,21 @@ type ServiceRepository interface {
+ }
+ 
+ type Service struct {
+-	repository        ServiceRepository
+-	accounts          AccountBindingRepository
+-	operations        OperationsRepository
+-	cipher            *security.Cipher
+-	mu                sync.RWMutex
+-	browserUA         string
+-	clearance         ClearanceManager
+-	prober            NodeProber
+-	operationsCache   OperationsConfigInvalidator
+-	qualityProber     QualityProber
+-	assignmentMu      sync.Mutex
+-	lastAssignmentRun time.Time
+-	assignmentRunning bool
++	repository                  ServiceRepository
++	accounts                    AccountBindingRepository
++	operations                  OperationsRepository
++	cipher                      *security.Cipher
++	mu                          sync.RWMutex
++	browserUA                   string
++	clearance                   ClearanceManager
++	prober                      NodeProber
++	operationsCache             OperationsConfigInvalidator
++	qualityProber               QualityProber
++	assignmentMu                sync.Mutex
++	lastAssignmentRun           time.Time
++	assignmentRunning           bool
++	autoAssignMaxNodeShare      float64
++	autoAssignMaxMigrationShare float64
+ }
+ 
+ func (s *Service) SetQualityProber(value QualityProber) {
+diff --git a/backend/internal/infra/config/config.go b/backend/internal/infra/config/config.go
+index f7a3c83..a04ee51 100644
+--- a/backend/internal/infra/config/config.go
++++ b/backend/internal/infra/config/config.go
+@@ -227,6 +227,18 @@ type RoutingConfig struct {
+ 	ReasoningReplayEnabled      bool     `yaml:"reasoningReplayEnabled"`
+ 	ReasoningReplayTTL          Duration `yaml:"reasoningReplayTTL"`
+ 	ReasoningReplayMaxEntries   int      `yaml:"reasoningReplayMaxEntries"`
++	// AutoAssignMaxNodeShare optionally caps how many active accounts one
++	// healthy node may absorb during auto assignment. 0 keeps the historical
++	// unbounded first-pass evacuation. Values in [0.05, 1] are a fraction of
++	// the active provider pool. GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE overrides
++	// this field when set to a valid value.
++	AutoAssignMaxNodeShare float64 `yaml:"autoAssignMaxNodeShare"`
++	// AutoAssignMaxMigrationShare optionally caps how many already-bound
++	// accounts may move in one maintenance cycle. 0 keeps the historical
++	// unbounded first-pass evacuation and the existing 200-move ceiling for
++	// capacity/rebalance repair. GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE
++	// overrides this field when set to a valid value.
++	AutoAssignMaxMigrationShare float64 `yaml:"autoAssignMaxMigrationShare"`
+ }
+ 
+ type AuditConfig struct {
+@@ -630,6 +642,9 @@ func (c Config) Validate() error {
+ 	if c.Routing.ReasoningReplayMaxEntries < 100 || c.Routing.ReasoningReplayMaxEntries > 1000000 {
+ 		return errors.New("routing.reasoningReplayMaxEntries 必须在 100 到 1000000 之间")
+ 	}
++	if !validAutoAssignShare(c.Routing.AutoAssignMaxNodeShare) || !validAutoAssignShare(c.Routing.AutoAssignMaxMigrationShare) {
++		return errors.New("routing.autoAssignMaxNodeShare 与 autoAssignMaxMigrationShare 必须为 0 或 0.05 到 1 之间")
++	}
+ 	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize || c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize || c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
+ 		return errors.New("audit 队列和批量写入配置无效")
+ 	}
+@@ -726,6 +741,10 @@ func validateQualityGuardConfig(value QualityGuardConfig) error {
+ 	return nil
+ }
+ 
++func validAutoAssignShare(value float64) bool {
++	return value == 0 || (value >= 0.05 && value <= 1)
++}
++
+ func validUniquePositiveIDs(values []uint64) bool {
+ 	seen := make(map[uint64]struct{}, len(values))
+ 	for _, value := range values {
+diff --git a/backend/internal/infra/config/config_test.go b/backend/internal/infra/config/config_test.go
+index bee1da7..99a0ea3 100644
+--- a/backend/internal/infra/config/config_test.go
++++ b/backend/internal/infra/config/config_test.go
+@@ -373,6 +373,22 @@ func TestRoutingMaxAttemptsSupportsLargeCredentialPools(t *testing.T) {
+ 	}
+ }
+ 
++func TestValidateRejectsInvalidAutoAssignShareConfig(t *testing.T) {
++	cfg := defaultConfig()
++	cfg.Routing.AutoAssignMaxNodeShare = 0.03
++	if err := cfg.Validate(); err == nil {
++		t.Fatal("autoAssignMaxNodeShare 0.03 should be rejected")
++	}
++	cfg = defaultConfig()
++	cfg.Routing.AutoAssignMaxMigrationShare = 1.5
++	if err := cfg.Validate(); err == nil {
++		t.Fatal("autoAssignMaxMigrationShare 1.5 should be rejected")
++	}
++	if !validAutoAssignShare(0) || !validAutoAssignShare(0.3) || !validAutoAssignShare(1) {
++		t.Fatal("0, 0.3, and 1 must remain valid shares")
++	}
++}
++
+ func TestValidateRejectsInvalidSegmentedSelectorConfig(t *testing.T) {
+ 	tests := []func(*RoutingConfig){
+ 		func(value *RoutingConfig) { value.SegmentedMinCandidates = 99 },
+diff --git a/config.example.yaml b/config.example.yaml
+index 788ba12..2dc70b8 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -95,6 +95,14 @@ routing:
+   segmentedSelectorEnabled: true
+   segmentedSelectorMinCandidates: 3000
+   segmentedSelectorWindowSize: 64
++  # [按需修改] 大账号池才需要打开。0 保持历史行为：不健康节点上的 auto 账号会一次性迁走。
++  # 0.05–1 表示每个健康节点最多吸收该比例的活跃账号。环境变量
++  # GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE 可覆盖。
++  autoAssignMaxNodeShare: 0
++  # [按需修改] 大账号池才需要打开。0 保持历史行为：首轮疏散不限额，容量/再均衡仍最多 200 次。
++  # 0.05–1 限制单轮已绑定账号迁移比例。环境变量
++  # GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE 可覆盖。
++  autoAssignMaxMigrationShare: 0
+ 
+ audit:
+   # [通常不要修改] 审计批量写入参数；bufferSize 的修改需重启生效。
+-- 
+2.50.1 (Apple Git-155)
+

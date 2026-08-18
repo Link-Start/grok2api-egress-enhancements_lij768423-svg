@@ -28,13 +28,17 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 
 这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，以及当前生产在跑的 **Quality Guard sidecar**（管理页 `/quality-guard`）。仓库不复制上游完整源码。
 
-当前补丁基于：
+当前补丁基于官方 `v3.1.3` / `57746fc7`。**四个 live 补丁都在本仓，可运行树是 fork：**
 
-- 上游版本：`v3.1.3` / `main` `57746fc7`（质量守护、thinking 守卫已合入官方）
-- 今日增量：请求路径 withhold + 换号重试（缺 thinking 不发给用户，最多换 5 次，打完仍无推理则 503）
-- 补丁文件：`patches/0006-feat-request-quality-hold-retry.patch`（叠在当前官方 main 上）
-- 上游 PR：[chenyme/grok2api#959](https://github.com/chenyme/grok2api/pull/959)
-- 可运行 Fork：[lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `feat/request-quality-hold-retry`
+| 能力 | 本仓代码 | 上游 PR | 别人怎么用到 |
+| --- | --- | --- | --- |
+| 缺 thinking 扣住换号 | `patches/0006-*.patch` | [#959](https://github.com/chenyme/grok2api/pull/959) | clone **fork** 再 `--build` |
+| compact 漂移仍留摘要 | `patches/0007-*.patch` | [#956](https://github.com/chenyme/grok2api/pull/956) | 同上 |
+| 搬号 30%/10% 上限 | `patches/0008-*.patch` | [#957](https://github.com/chenyme/grok2api/pull/957) | 同上 |
+| sidecar 认 `GROK2API_BASE_URL` | `patches/0009-*.patch` + `sidecar/quality_guard.py` | [#958](https://github.com/chenyme/grok2api/pull/958) | 同上 |
+
+四个都是 **Grok2API 网关 / sidecar** 代码，不是 CPA 插件。插件 `.so` 没有这四项。  
+0006 和 0008 都改 `config.go`，不要指望在官方树上 `git am` 四个无冲突。直接用 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`。
 
 仍停在 `v3.0.11` 时，继续使用遗留补丁 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`（对应已关闭的 [#837](https://github.com/chenyme/grok2api/pull/837)）。
 
@@ -96,7 +100,7 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 
 ### CPA 原生出口守护插件
 
-`cpa-plugin/` 现为 **v1.0.9 纯 CPA 原生插件**，不依赖、不连接 Grok2API 运行时。它通过 CPA Host API 读取认证文件和 Usage 事件，把账号的 `proxy_url` 粘性绑定到出口节点，并提供节点 CRUD、逐行批量导入、批量操作、连通性/真实质量检测、可配置探针方案（吞吐基线 / 预期标记 / 自定义 Prompt）、隔离迁号、策略热加载、统计事件和深浅色管理 UI。v1.0.9 起主动探测可按方案校验最后一行或正则标记；v1.0.8 起商店安装后注册不再同步扫认证文件，避免多账号时一直「未生效」；v1.0.7 起 CPA 调度跳过隔离/冷却出口，账号或额度错误只记为 ignored，迁移会写后读回校验，并支持节点白名单化的内部换 IP Webhook。构建与部署方法见 [cpa-plugin/README.md](./cpa-plugin/README.md)，代理规划、账号容量、隔离恢复和强制住宅 IP 轮换见 [AI 部署与运维指南](./cpa-plugin/AI_USAGE_GUIDE.md)。
+`cpa-plugin/` 现为 **v1.1.0 纯 CPA 原生插件**（功能同 1.0.9；本版 Release 主更 grok2api 0006–0009），不依赖、不连接 Grok2API 运行时。它通过 CPA Host API 读取认证文件和 Usage 事件，把账号的 `proxy_url` 粘性绑定到出口节点，并提供节点 CRUD、逐行批量导入、批量操作、连通性/真实质量检测、可配置探针方案（吞吐基线 / 预期标记 / 自定义 Prompt）、隔离迁号、策略热加载、统计事件和深浅色管理 UI。v1.0.9 起主动探测可按方案校验最后一行或正则标记；v1.0.8 起商店安装后注册不再同步扫认证文件，避免多账号时一直「未生效」；v1.0.7 起 CPA 调度跳过隔离/冷却出口，账号或额度错误只记为 ignored，迁移会写后读回校验，并支持节点白名单化的内部换 IP Webhook。构建与部署方法见 [cpa-plugin/README.md](./cpa-plugin/README.md)，代理规划、账号容量、隔离恢复和强制住宅 IP 轮换见 [AI 部署与运维指南](./cpa-plugin/AI_USAGE_GUIDE.md)。
 
 推荐的完整链路（家宽 → Mihomo 每 session 一个 listener → **Grok2API 节点** → Quality Guard）见[推荐出口部署方式](./docs/RECOMMENDED_DEPLOYMENT.md)。给 AI 的落地顺序见 [docs/AI_GROK2API_INSTALL.md](./docs/AI_GROK2API_INSTALL.md)。
 

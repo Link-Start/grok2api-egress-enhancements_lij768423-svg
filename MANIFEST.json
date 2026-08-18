@@ -3,26 +3,52 @@
   "upstream_repository": "https://github.com/chenyme/grok2api",
   "upstream_tag": "v3.1.3",
   "upstream_commit": "57746fc70289fcbab4bf33db33c521cf756ebbb9",
-  "patch_commit": "506b4e46f9567308ca18494593e6a4d932f40852",
-  "runnable_commit": "506b4e46f9567308ca18494593e6a4d932f40852",
-  "patch_file": "patches/0006-feat-request-quality-hold-retry.patch",
-  "patch_sha256": "433d20fec1ea5caea039f5cbcec971b6c26c3095440818cb7b074479b24d9507",
-  "upstream_pr": "https://github.com/chenyme/grok2api/pull/959",
   "runnable_fork": "https://github.com/lij768423-svg/grok2api",
-  "applies_on": "chenyme/grok2api main at 57746fc7 (after thinking-guard / #930)",
+  "runnable_note": "Fork main = official main + #956 #957 #958 #959. Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
+  "patches": [
+    {
+      "id": "0006",
+      "file": "patches/0006-feat-request-quality-hold-retry.patch",
+      "sha256": "433d20fec1ea5caea039f5cbcec971b6c26c3095440818cb7b074479b24d9507",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/959",
+      "patch_commit": "506b4e46f9567308ca18494593e6a4d932f40852",
+      "implements": "request-path missing-thinking withhold + account retry"
+    },
+    {
+      "id": "0007",
+      "file": "patches/0007-fix-compaction-session-drift.patch",
+      "sha256": "4edd96308624daadf9f97f4093d5f84feb4d7974c0b509cc6e46c429bdfc08ff",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/956",
+      "patch_commit": "ae6447e5a1fcc78001448b8e7e93908bd7e2e467",
+      "implements": "keep compaction summary when session key drifts"
+    },
+    {
+      "id": "0008",
+      "file": "patches/0008-feat-auto-assign-migration-bounds.patch",
+      "sha256": "a2348e6f77c696f69b7e9ebbb566f9d35de28d61e9c40959b4aac59acf89dd86",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/957",
+      "patch_commit": "ae05b4f749443969d554a9b2c6954328286d5807",
+      "implements": "auto-assign node share and per-cycle migration caps"
+    },
+    {
+      "id": "0009",
+      "file": "patches/0009-fix-quality-guard-base-url.patch",
+      "sha256": "d7801ddc867e90c519e179dd32d305ec23db3ca0402891b6df777d1260add9ba",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/958",
+      "patch_commit": "08f732bab2b2f67d633c59b81e4b6a15eae099de",
+      "implements": "quality-guard sidecar GROK2API_BASE_URL",
+      "also_in": "sidecar/quality_guard.py"
+    }
+  ],
+  "applies_on": "chenyme/grok2api v3.1.3 / 57746fc7 (independent PRs; 0006 and 0008 both touch config.go — use the fork if you need all four)",
   "previous": {
     "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
-    "patch_sha256": "29d29ea5f975f46e925f2b89f8699643e84e0248628170838a2bb9a03fe328bf",
     "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",
-    "note": "0005 is already in official main. Apply 0006 on current official main."
+    "note": "0005 is already in official main."
   },
   "legacy": {
     "upstream_tag": "v3.0.11",
-    "upstream_commit": "090104504b403d65675a01dab9c92b3a235ee832",
-    "patch_commit": "334dbe0f01ea0294318856873136c4196f835a04",
     "patch_file": "patches/0001-feat-add-egress-recovery-and-quality-guard.patch",
-    "patch_sha256": "0c40c0167cea9ce200d507819c89f9c15da7ca49ee404cc4d2f5b7c54bc8313e",
-    "upstream_pr": "https://github.com/chenyme/grok2api/pull/837",
-    "note": "Quality guard and probe-wait recovery are upstream as of v3.1.x. Use 0001 only on v3.0.11."
+    "upstream_pr": "https://github.com/chenyme/grok2api/pull/837"
   }
 }
