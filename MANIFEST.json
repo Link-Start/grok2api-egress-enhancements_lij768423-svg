@@ -7,6 +7,14 @@
   "runnable_note": "Fork main = official main + missing-thinking 24h cooldown / second-strike disable + degrade-accounts thinking list (#966) + TUI compaction hold skip (#967) + empty-hold idle SSE terminal (#968). Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
   "patches": [
     {
+      "id": "0014",
+      "file": "patches/0014-fix-responses-cli-ids.patch",
+      "sha256": "6323046d2a7aa3300f83b05534bb8f95a5c06ca7ed6c5147e7375ff9103dd462",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/968",
+      "patch_commit": "871824039335769f88aaeeecbd39b9677b484d09",
+      "implements": "fill Responses event/item/error ids so Grok CLI does not serde-fail"
+    },
+    {
       "id": "0013",
       "file": "patches/0013-fix-incomplete-response-id.patch",
       "sha256": "9e91ae99f86aa0a70d0f362db4fe9a77385b72559e8e1750d7db873a804dd3e6",
@@ -72,7 +80,7 @@
       "also_in": "sidecar/quality_guard.py"
     }
   ],
-  "applies_on": "chenyme/grok2api current main (a4b33d47+). 0010–0013 apply on official main after #959. Prefer the fork if you want 0006–0013 together.",
+  "applies_on": "chenyme/grok2api current main (a4b33d47+). 0010\u20130014 apply on official main after #959. Prefer the fork if you want 0006\u20130014 together.",
   "previous": {
     "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
     "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",

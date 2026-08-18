@@ -34,6 +34,7 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 | --- | --- | --- | --- |
 | 空 hold / idle 不再 fail-open 成 200 | `patches/0012-*.patch` | [#968](https://github.com/chenyme/grok2api/pull/968) | clone **fork** 再 `--build` |
 | incomplete 补齐 id/created_at | `patches/0013-*.patch` | [#968](https://github.com/chenyme/grok2api/pull/968) | 同上 |
+| 流式补齐 item/event/error id | `patches/0014-*.patch` | [#968](https://github.com/chenyme/grok2api/pull/968) | 同上 |
 | TUI 压缩不当无思考 | `patches/0011-*.patch` | [#967](https://github.com/chenyme/grok2api/pull/967) | 同上 |
 | 缺 thinking 冷却 24h / 再犯禁用 + 降智列表 | `patches/0010-*.patch` | [#966](https://github.com/chenyme/grok2api/pull/966) | 同上 |
 | 缺 thinking 扣住换号 | `patches/0006-*.patch` | [#959](https://github.com/chenyme/grok2api/pull/959) | 同上（官方已合） |
