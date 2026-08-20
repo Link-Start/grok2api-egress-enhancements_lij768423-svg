@@ -1,0 +1,177 @@
+From 24ce972b37941e5e084a18d13ebe1cdb321166ee Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Thu, 20 Aug 2026 11:43:23 +0800
+Subject: [PATCH] fix: emit response.failed with required model for Grok TUI
+ serde
+
+TUI 0.2.93 treats any response.incomplete as fatal max_tokens_truncation,
+ignoring incomplete_details.reason, so stream aborts killed the turn.
+serde also requires model on response.failed / completed; a missing key
+fails deserialization. Always emit response.failed and fill model from
+stream metadata or the last seen response event.
+---
+ .../transport/http/inference/handler.go       | 35 ++++++++++++-------
+ .../transport/http/inference/handler_test.go  | 26 ++++++++++----
+ .../http/inference/responses_compat.go        | 11 ++++++
+ 3 files changed, 53 insertions(+), 19 deletions(-)
+
+diff --git a/backend/internal/transport/http/inference/handler.go b/backend/internal/transport/http/inference/handler.go
+index af803a0f..a8b09ba3 100644
+--- a/backend/internal/transport/http/inference/handler.go
++++ b/backend/internal/transport/http/inference/handler.go
+@@ -1418,21 +1418,30 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
+ 		}
+ 		compat.rememberFromMeta(meta)
+ 		id := compat.ensureID()
++		// Grok TUI 0.2.93 treats any response.incomplete as fatal
++		// max_tokens_truncation (not retryable), ignoring incomplete_details.reason.
++		// Stream aborts are transport failures — emit response.failed so the
++		// client can retry instead of killing the turn.
++		model := strings.TrimSpace(meta.Model)
++		if model == "" {
++			model = strings.TrimSpace(compat.model)
++		}
+ 		response := map[string]any{
+-			"id":                 id,
+-			"object":             "response",
+-			"created_at":         compat.createdAt,
+-			"completed_at":       compat.createdAt,
+-			"status":             "incomplete",
+-			"output":             []any{},
+-			"error":              nil,
+-			"incomplete_details": map[string]any{"reason": code},
+-		}
+-		if model := strings.TrimSpace(meta.Model); model != "" {
+-			response["model"] = model
++			"id":           id,
++			"object":       "response",
++			"created_at":   compat.createdAt,
++			"completed_at": compat.createdAt,
++			"status":       "failed",
++			"model":        model,
++			"output":       []any{},
++			"error": map[string]any{
++				"code":    code,
++				"message": message,
++				"type":    "server_error",
++			},
+ 		}
+ 		event := map[string]any{
+-			"type":            "response.incomplete",
++			"type":            "response.failed",
+ 			"id":              id,
+ 			"sequence_number": meta.SequenceNumber + 1,
+ 			"response":        response,
+@@ -1442,7 +1451,7 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
+ 		if err != nil {
+ 			return nil
+ 		}
+-		return []byte("event: response.incomplete\ndata: " + string(payload) + "\n\n")
++		return []byte("event: response.failed\ndata: " + string(payload) + "\n\n")
+ 	case streamProtocolAnthropic:
+ 		payload, err := json.Marshal(map[string]any{
+ 			"type":  "error",
+diff --git a/backend/internal/transport/http/inference/handler_test.go b/backend/internal/transport/http/inference/handler_test.go
+index 9215bd34..0d526d64 100644
+--- a/backend/internal/transport/http/inference/handler_test.go
++++ b/backend/internal/transport/http/inference/handler_test.go
+@@ -991,7 +991,7 @@ func TestCopyStreamWritesTerminalOnIdleTimeout(t *testing.T) {
+ 		want     []string
+ 	}{
+ 		{name: "chat", protocol: streamProtocolChat, want: []string{`"code":"upstream_stream_idle_timeout"`, "data: [DONE]"}},
+-		{name: "responses", protocol: streamProtocolResponses, want: []string{`"type":"response.incomplete"`, `"id":"resp_abort"`, `"created_at":`, `"sequence_number":`, `"incomplete_details"`}},
++		{name: "responses", protocol: streamProtocolResponses, want: []string{`"type":"response.failed"`, `"id":"resp_abort"`, `"created_at":`, `"sequence_number":`, `"code":"upstream_stream_idle_timeout"`, `"status":"failed"`, `"model":`}},
+ 		{name: "anthropic", protocol: streamProtocolAnthropic, want: []string{`"type":"error"`, "上游流式响应长时间无数据"}},
+ 	}
+ 	for _, test := range tests {
+@@ -1046,7 +1046,7 @@ func TestCopyStreamFlushesUnterminatedResponsesTailBeforeAbort(t *testing.T) {
+ 		t.Fatalf("copy error = %v", err)
+ 	}
+ 	got := recorder.Body.String()
+-	if !strings.Contains(got, `"delta":"partial"`) || !strings.Contains(got, "\n\nevent: response.incomplete") {
++	if !strings.Contains(got, `"delta":"partial"`) || !strings.Contains(got, "\n\nevent: response.failed") {
+ 		t.Fatalf("unterminated tail and abort event were not separated: %q", got)
+ 	}
+ 	if marked != 1 {
+@@ -1070,7 +1070,7 @@ func TestCopyStreamDropsMalformedResponsesTailBeforeAbort(t *testing.T) {
+ 	if strings.Contains(got, string(malformed)) {
+ 		t.Fatalf("malformed tail leaked before terminal event: %q", got)
+ 	}
+-	if !strings.Contains(got, `"type":"response.incomplete"`) {
++	if !strings.Contains(got, `"type":"response.failed"`) {
+ 		t.Fatalf("abort event missing after malformed tail: %q", got)
+ 	}
+ }
+@@ -1099,7 +1099,7 @@ func TestCopyStreamWritesTerminalOnIncompleteEOF(t *testing.T) {
+ 		t.Fatalf("copy error = %v", err)
+ 	}
+ 	got := recorder.Body.String()
+-	if !strings.Contains(got, `"type":"response.incomplete"`) || !strings.Contains(got, `"reason":"upstream_stream_incomplete"`) {
++	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"code":"upstream_stream_incomplete"`) {
+ 		t.Fatalf("incomplete EOF missing terminal SSE event: %q", got)
+ 	}
+ }
+@@ -1111,8 +1111,22 @@ func TestSanitizeResponsesFillsMissingIDs(t *testing.T) {
+ 		t.Fatalf("item id not filled: %s", got)
+ 	}
+ 	got = rewriteResponsesDataLine([]byte(`data: {"type":"response.created","response":{"status":"in_progress"}}`+"\n"), state)
+-	if !bytes.Contains(got, []byte(`"id":"resp_abort"`)) || !bytes.Contains(got, []byte(`"created_at":`)) {
+-		t.Fatalf("response id/created_at not filled: %s", got)
++	if !bytes.Contains(got, []byte(`"id":"resp_abort"`)) || !bytes.Contains(got, []byte(`"created_at":`)) || !bytes.Contains(got, []byte(`"model":`)) {
++		t.Fatalf("response id/created_at/model not filled: %s", got)
++	}
++}
++
++func TestCopyStreamAbortTrailerAlwaysIncludesModel(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(recorder)
++	_, err := copyStream(context.Writer, &idleErrorReader{}, streamProtocolResponses, nil)
++	if !errors.Is(err, errUpstreamStreamRead) {
++		t.Fatalf("copy error = %v", err)
++	}
++	got := recorder.Body.String()
++	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"model":`) {
++		t.Fatalf("abort trailer missing model: %q", got)
+ 	}
+ }
+ 
+diff --git a/backend/internal/transport/http/inference/responses_compat.go b/backend/internal/transport/http/inference/responses_compat.go
+index 4926d54b..ba7e619d 100644
+--- a/backend/internal/transport/http/inference/responses_compat.go
++++ b/backend/internal/transport/http/inference/responses_compat.go
+@@ -12,6 +12,7 @@ import (
+ type responsesCompatState struct {
+ 	responseID      string
+ 	createdAt       int64
++	model           string
+ 	itemSeq         int
+ 	itemIDs         map[int64]string
+ 	usedItemIDs     map[string]struct{}
+@@ -102,6 +103,9 @@ func (s *responsesCompatState) rememberFromMeta(meta responseMetadata) {
+ 	if id := strings.TrimSpace(meta.ResponseID); id != "" {
+ 		s.responseID = id
+ 	}
++	if model := strings.TrimSpace(meta.Model); model != "" {
++		s.model = model
++	}
+ 	s.ensureID()
+ }
+ 
+@@ -173,6 +177,13 @@ func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) b
+ 			resp["output"] = []any{}
+ 			changed = true
+ 		}
++		if model := strings.TrimSpace(stringAny(resp["model"])); model != "" {
++			state.model = model
++		} else {
++			// Grok TUI serde requires `model` on response.failed / completed.
++			resp["model"] = state.model
++			changed = true
++		}
+ 		if errObj, ok := resp["error"].(map[string]any); ok && strings.TrimSpace(stringAny(errObj["id"])) == "" {
+ 			errObj["id"] = "err_" + strings.TrimPrefix(state.ensureID(), "resp_")
+ 			changed = true
+-- 
+2.50.1 (Apple Git-155)
+

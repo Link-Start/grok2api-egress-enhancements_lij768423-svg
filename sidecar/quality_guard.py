@@ -744,6 +744,7 @@ class Guard:
         ranking.setdefault("last_table", [])
         ranking.setdefault("last_moves", [])
         self._admin: AdminApiClient | None = None
+        self._resolved_node_ids: list[str] = []
         self._update_guard_metadata()
         self._save()
 

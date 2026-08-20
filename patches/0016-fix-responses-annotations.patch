@@ -1,0 +1,87 @@
+From 68e58814336646c2aececb3b05f1489c8b1fedd9 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Thu, 20 Aug 2026 01:07:29 +0800
+Subject: [PATCH] fix: fill required output_text.annotations for Grok CLI serde
+
+Grok CLI treats annotations as a required field. A missing key fails
+deserialization with "missing field annotations" and the TUI retries
+the turn. Keep existing citation arrays untouched.
+---
+ .../transport/http/inference/handler_test.go  | 20 +++++++++++++
+ .../http/inference/responses_compat.go        | 29 +++++++++++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/backend/internal/transport/http/inference/handler_test.go b/backend/internal/transport/http/inference/handler_test.go
+index 9215bd34..29f1fe57 100644
+--- a/backend/internal/transport/http/inference/handler_test.go
++++ b/backend/internal/transport/http/inference/handler_test.go
+@@ -1166,6 +1166,26 @@ func TestSanitizeResponsesDoesNotAddResponseIDToErrorEvent(t *testing.T) {
+ 	}
+ }
+ 
++func TestSanitizeResponsesFillsMissingOutputTextAnnotations(t *testing.T) {
++	state := &responsesCompatState{}
++	added := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.added","item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`+"\n"), state)
++	if !bytes.Contains(added, []byte(`"annotations":[]`)) {
++		t.Fatalf("item output_text missing annotations: %s", added)
++	}
++	completed := rewriteResponsesDataLine([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}}`+"\n"), state)
++	if !bytes.Contains(completed, []byte(`"annotations":[]`)) {
++		t.Fatalf("completed output_text missing annotations: %s", completed)
++	}
++	part := rewriteResponsesDataLine([]byte(`data: {"type":"response.content_part.added","part":{"type":"output_text","text":"hi"}}`+"\n"), state)
++	if !bytes.Contains(part, []byte(`"annotations":[]`)) {
++		t.Fatalf("content_part output_text missing annotations: %s", part)
++	}
++	kept := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hi","annotations":[{"type":"url_citation","url":"https://x.test"}]}]}}`+"\n"), state)
++	if !bytes.Contains(kept, []byte(`"url":"https://x.test"`)) || bytes.Contains(kept, []byte(`"annotations":[]`)) {
++		t.Fatalf("existing annotations were replaced: %s", kept)
++	}
++}
++
+ func TestResponsesCompatBoundsUnterminatedLineBuffer(t *testing.T) {
+ 	state := &responsesCompatState{}
+ 	chunk := bytes.Repeat([]byte{'x'}, maxStreamEventInspectionBytes+1)
+diff --git a/backend/internal/transport/http/inference/responses_compat.go b/backend/internal/transport/http/inference/responses_compat.go
+index 4926d54b..731d1968 100644
+--- a/backend/internal/transport/http/inference/responses_compat.go
++++ b/backend/internal/transport/http/inference/responses_compat.go
+@@ -221,6 +221,35 @@ func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) b
+ 			}
+ 		}
+ 	}
++	if ensureOutputTextAnnotations(event) {
++		changed = true
++	}
++	return changed
++}
++
++// Grok CLI serde requires output_text.annotations even when there are no
++// citations. Missing the field makes a retry fail with
++// "serialization error: missing field `annotations`".
++func ensureOutputTextAnnotations(node any) bool {
++	changed := false
++	switch typed := node.(type) {
++	case map[string]any:
++		if stringAny(typed["type"]) == "output_text" && typed["annotations"] == nil {
++			typed["annotations"] = []any{}
++			changed = true
++		}
++		for _, key := range []string{"item", "part", "response", "content", "output", "delta"} {
++			if ensureOutputTextAnnotations(typed[key]) {
++				changed = true
++			}
++		}
++	case []any:
++		for _, child := range typed {
++			if ensureOutputTextAnnotations(child) {
++				changed = true
++			}
++		}
++	}
+ 	return changed
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

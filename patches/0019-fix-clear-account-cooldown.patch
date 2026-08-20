@@ -1,0 +1,519 @@
+From 78c17a83b3a42a750c522b96228189718ed32b86 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Thu, 20 Aug 2026 02:38:32 +0800
+Subject: [PATCH] fix: allow clearing account cooldown and configure
+ empty-stream penalty
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Empty SSE idle timeouts currently write a hardcoded 24h cooldown via
+qualityIdleAccountCooldown. Toggling enabled does not reset health, so a
+single-account pool stays on 429 upstream_cooling until the operator
+edits sqlite and restarts.
+
+Add POST /api/admin/v1/accounts/:id/clear-cooldown (API + UI) which
+zeros failure_count/cooldown_until/last_error. UpdateHealth already
+publishes InvalidationAccountHealthChanged, so runtimeStore=memory
+selector overlays are replaced.
+
+Expose qualityGuard.requestRetry.idleAccountCooldown (1m–168h, default
+24h) independently of missing-thinking accountCooldown. PATCH enabled
+while cooling returns enabledDoesNotClearCooldown so the UI can warn.
+
+Closes #976
+---
+ backend/internal/app/application.go           | 13 ++--
+ .../internal/application/account/service.go   | 21 +++++++
+ .../application/gateway/quality_retry.go      |  6 ++
+ .../application/gateway/quality_retry_test.go |  2 +-
+ .../internal/application/gateway/service.go   | 13 ++--
+ .../application/gateway/service_test.go       | 10 ++-
+ backend/internal/infra/config/config.go       |  8 ++-
+ backend/internal/infra/config/config_test.go  |  8 ++-
+ .../transport/http/account/handler.go         | 20 ++++++
+ .../transport/http/account/handler_test.go    | 61 +++++++++++++++++++
+ config.example.yaml                           |  4 ++
+ .../src/features/accounts/accounts-api.ts     |  6 ++
+ .../src/features/accounts/accounts-page.tsx   | 18 +++++-
+ frontend/src/shared/i18n/index.ts             |  6 ++
+ 14 files changed, 178 insertions(+), 18 deletions(-)
+
+diff --git a/backend/internal/app/application.go b/backend/internal/app/application.go
+index 7f648c53..169a11a8 100644
+--- a/backend/internal/app/application.go
++++ b/backend/internal/app/application.go
+@@ -491,12 +491,13 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
+ 
+ func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.QualityRetryRuntime {
+ 	return gateway.QualityRetryRuntime{
+-		Enabled:         value.Enabled,
+-		MaxAttempts:     value.MaxAttempts,
+-		HoldTimeout:     value.HoldTimeout.Value(),
+-		MinOutputTokens: int64(value.MinOutputTokens),
+-		OnExhausted:     value.OnExhausted,
+-		AccountCooldown: value.AccountCooldown.Value(),
++		Enabled:             value.Enabled,
++		MaxAttempts:         value.MaxAttempts,
++		HoldTimeout:         value.HoldTimeout.Value(),
++		MinOutputTokens:     int64(value.MinOutputTokens),
++		OnExhausted:         value.OnExhausted,
++		AccountCooldown:     value.AccountCooldown.Value(),
++		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
+ 	}
+ }
+ 
+diff --git a/backend/internal/application/account/service.go b/backend/internal/application/account/service.go
+index bfb1843f..7a4bb35f 100644
+--- a/backend/internal/application/account/service.go
++++ b/backend/internal/application/account/service.go
+@@ -2279,6 +2279,27 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
+ 	return s.Get(ctx, updated.ID)
+ }
+ 
++// ClearCooldown resets request-path health so a cooled account can be
++// scheduled again. UpdateHealth publishes InvalidationAccountHealthChanged,
++// which overwrites the selector memory overlay (runtimeStore=memory).
++func (s *Service) ClearCooldown(ctx context.Context, id uint64) (View, error) {
++	value, err := s.accounts.Get(ctx, id)
++	if err != nil {
++		return View{}, mapRepositoryError(err)
++	}
++	if err := s.accounts.UpdateHealth(ctx, value.ID, value.Provider, 0, nil, "", false); err != nil {
++		return View{}, mapRepositoryError(err)
++	}
++	updated, err := s.accounts.Get(ctx, id)
++	if err != nil {
++		return View{}, mapRepositoryError(err)
++	}
++	return View{
++		Credential: updated,
++		Quota:      QuotaView{Type: QuotaTypeUnknown, Source: "unknown", Status: QuotaStatusActive},
++	}, nil
++}
++
+ // MarkBuildAPIFallback 幂等写入 Build 账号 XAI 推理回退标记；失败不吞掉，调用方可重试。
+ func (s *Service) MarkBuildAPIFallback(ctx context.Context, id uint64, enabled bool) error {
+ 	return mapRepositoryError(s.accounts.MarkBuildAPIFallback(ctx, id, enabled))
+diff --git a/backend/internal/application/gateway/quality_retry.go b/backend/internal/application/gateway/quality_retry.go
+index 78cd164e..c6134fcc 100644
+--- a/backend/internal/application/gateway/quality_retry.go
++++ b/backend/internal/application/gateway/quality_retry.go
+@@ -45,6 +45,9 @@ type QualityRetryRuntime struct {
+ 	MinOutputTokens int64
+ 	OnExhausted     string
+ 	AccountCooldown time.Duration
++	// IdleAccountCooldown is applied to truly empty upstream streams
++	// (idle timeout / empty peek). Missing-thinking still uses AccountCooldown.
++	IdleAccountCooldown time.Duration
+ }
+ 
+ // QualityStreamSignals is the hold classifier input. Tests drive this
+@@ -90,6 +93,9 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
+ 	if cfg.AccountCooldown <= 0 {
+ 		cfg.AccountCooldown = defaultMissingThinkingCooldown
+ 	}
++	if cfg.IdleAccountCooldown <= 0 {
++		cfg.IdleAccountCooldown = qualityIdleAccountCooldown
++	}
+ 	cfg.OnExhausted = normalizeQualityExhaustionPolicy(cfg.OnExhausted)
+ 	return cfg
+ }
+diff --git a/backend/internal/application/gateway/quality_retry_test.go b/backend/internal/application/gateway/quality_retry_test.go
+index 3c0035d8..7543ed09 100644
+--- a/backend/internal/application/gateway/quality_retry_test.go
++++ b/backend/internal/application/gateway/quality_retry_test.go
+@@ -894,7 +894,7 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
+ func TestNormalizeQualityRetryDefaults(t *testing.T) {
+ 	t.Parallel()
+ 	got := normalizeQualityRetry(QualityRetryRuntime{Enabled: true})
+-	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 32 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second || got.AccountCooldown != 24*time.Hour {
++	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 32 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second || got.AccountCooldown != 24*time.Hour || got.IdleAccountCooldown != 24*time.Hour {
+ 		t.Fatalf("defaults = %#v", got)
+ 	}
+ }
+diff --git a/backend/internal/application/gateway/service.go b/backend/internal/application/gateway/service.go
+index b4b0136f..c5d764b1 100644
+--- a/backend/internal/application/gateway/service.go
++++ b/backend/internal/application/gateway/service.go
+@@ -1059,7 +1059,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
+ 				lease.completeSelectorObservation(successful)
+ 				budget := newFinalizationBudget(string(operation), string(route.Provider))
+ 				if isUpstreamStreamFailure(errorCode) {
+-					status, retryAfter := streamFailureHealthPenalty(errorCode, usage)
++					status, retryAfter := streamFailureHealthPenalty(errorCode, usage, s.qualityRetryConfig().IdleAccountCooldown)
+ 					if err := budget.run("account_health", finalizationHealthBudget, func(stageCtx context.Context) error {
+ 						return s.selector.MarkFailureAfterSuccess(stageCtx, credential, status, retryAfter)
+ 					}); err != nil {
+@@ -1536,10 +1536,10 @@ attemptLoop:
+ 							logPrefix = "quality_peek_empty"
+ 						}
+ 						writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+-						if markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, http.StatusGatewayTimeout, qualityIdleAccountCooldown); markErr != nil {
++						if markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, http.StatusGatewayTimeout, holdCfg.IdleAccountCooldown); markErr != nil {
+ 							s.logger.Warn(logPrefix+"_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+ 						} else {
+-							s.logger.Warn(logPrefix+"_retry", "request_id", input.RequestID, "account_id", credential.ID, "cooldown", qualityIdleAccountCooldown)
++							s.logger.Warn(logPrefix+"_retry", "request_id", input.RequestID, "account_id", credential.ID, "cooldown", holdCfg.IdleAccountCooldown)
+ 						}
+ 						writeCancel()
+ 					}
+@@ -1684,9 +1684,12 @@ func isUpstreamStreamFailure(errorCode string) bool {
+ 	}
+ }
+ 
+-func streamFailureHealthPenalty(errorCode string, usage Usage) (int, time.Duration) {
++func streamFailureHealthPenalty(errorCode string, usage Usage, idleCooldown time.Duration) (int, time.Duration) {
+ 	if errorCode == "upstream_stream_idle_timeout" && !usage.OutputObserved && usage.OutputTokens == 0 && usage.ReasoningTokens == 0 {
+-		return http.StatusGatewayTimeout, qualityIdleAccountCooldown
++		if idleCooldown <= 0 {
++			idleCooldown = qualityIdleAccountCooldown
++		}
++		return http.StatusGatewayTimeout, idleCooldown
+ 	}
+ 	return 0, 0
+ }
+diff --git a/backend/internal/application/gateway/service_test.go b/backend/internal/application/gateway/service_test.go
+index 0f35a833..e5a90a9b 100644
+--- a/backend/internal/application/gateway/service_test.go
++++ b/backend/internal/application/gateway/service_test.go
+@@ -4350,16 +4350,20 @@ func TestIsUpstreamStreamFailureIncludesIdleTimeout(t *testing.T) {
+ 
+ func TestStreamFailureHealthPenaltyOnlyLongCoolsTrulyEmptyIdle(t *testing.T) {
+ 	t.Parallel()
+-	status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{})
+-	if status != http.StatusGatewayTimeout || cooldown != qualityIdleAccountCooldown {
++	status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{}, 15*time.Minute)
++	if status != http.StatusGatewayTimeout || cooldown != 15*time.Minute {
+ 		t.Fatalf("empty idle penalty = (%d, %s)", status, cooldown)
+ 	}
++	status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{}, 0)
++	if status != http.StatusGatewayTimeout || cooldown != qualityIdleAccountCooldown {
++		t.Fatalf("zero idle cooldown must fall back to default (%d, %s)", status, cooldown)
++	}
+ 	for _, usage := range []Usage{
+ 		{OutputObserved: true},
+ 		{OutputTokens: 1},
+ 		{ReasoningTokens: 1},
+ 	} {
+-		status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", usage)
++		status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", usage, 15*time.Minute)
+ 		if status != 0 || cooldown != 0 {
+ 			t.Fatalf("non-empty idle usage %#v received long penalty (%d, %s)", usage, status, cooldown)
+ 		}
+diff --git a/backend/internal/infra/config/config.go b/backend/internal/infra/config/config.go
+index da19074f..fbd49c7b 100644
+--- a/backend/internal/infra/config/config.go
++++ b/backend/internal/infra/config/config.go
+@@ -294,6 +294,9 @@ type QualityGuardRequestRetryConfig struct {
+ 	MinOutputTokens int      `yaml:"minOutputTokens"`
+ 	OnExhausted     string   `yaml:"onExhausted"`
+ 	AccountCooldown Duration `yaml:"accountCooldown"`
++	// IdleAccountCooldown cools an account after a truly empty upstream
++	// stream. Independent of accountCooldown (missing-thinking). Zero uses 24h.
++	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
+ }
+ 
+ type ClientKeyDefaultsConfig struct {
+@@ -799,6 +802,9 @@ func validateQualityGuardRequestRetry(value QualityGuardRequestRetryConfig) erro
+ 	if d := value.AccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
+ 		return errors.New("qualityGuard.requestRetry.accountCooldown 必须在 1m 到 168h 之间")
+ 	}
++	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
++		return errors.New("qualityGuard.requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间")
++	}
+ 	return nil
+ }
+ 
+@@ -932,7 +938,7 @@ func defaultConfig() Config {
+ 			MinimumGenerationWindow: Duration(time.Second), RotationTimeout: Duration(45 * time.Second),
+ 			RequestRetry: QualityGuardRequestRetryConfig{
+ 				MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed",
+-				AccountCooldown: Duration(24 * time.Hour),
++				AccountCooldown: Duration(24 * time.Hour), IdleAccountCooldown: Duration(24 * time.Hour),
+ 			},
+ 		},
+ 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
+diff --git a/backend/internal/infra/config/config_test.go b/backend/internal/infra/config/config_test.go
+index c7441e5c..6244a68e 100644
+--- a/backend/internal/infra/config/config_test.go
++++ b/backend/internal/infra/config/config_test.go
+@@ -223,7 +223,7 @@ qualityGuard:
+ func TestDefaultQualityGuardRequestRetryContract(t *testing.T) {
+ 	t.Parallel()
+ 	got := defaultConfig().QualityGuard.RequestRetry
+-	if got.Enabled || got.MaxAttempts != 6 || got.HoldTimeout.Value() != 3*time.Second || got.MinOutputTokens != 32 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour {
++	if got.Enabled || got.MaxAttempts != 6 || got.HoldTimeout.Value() != 3*time.Second || got.MinOutputTokens != 32 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour || got.IdleAccountCooldown.Value() != 24*time.Hour {
+ 		t.Fatalf("requestRetry defaults = %#v", got)
+ 	}
+ }
+@@ -248,6 +248,12 @@ func TestQualityGuardRequestRetryAccountCooldownBounds(t *testing.T) {
+ 			if (err != nil) != test.wantErr {
+ 				t.Fatalf("validate cooldown %s: err=%v, wantErr=%t", test.value, err, test.wantErr)
+ 			}
++			err = validateQualityGuardRequestRetry(QualityGuardRequestRetryConfig{
++				Enabled: true, IdleAccountCooldown: Duration(test.value),
++			})
++			if (err != nil) != test.wantErr {
++				t.Fatalf("validate idle cooldown %s: err=%v, wantErr=%t", test.value, err, test.wantErr)
++			}
+ 		})
+ 	}
+ }
+diff --git a/backend/internal/transport/http/account/handler.go b/backend/internal/transport/http/account/handler.go
+index 729ea2b0..c3ec991a 100644
+--- a/backend/internal/transport/http/account/handler.go
++++ b/backend/internal/transport/http/account/handler.go
+@@ -165,6 +165,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
+ 	router.DELETE("/accounts", h.batchDelete)
+ 	router.PATCH("/accounts/:id", h.update)
+ 	router.DELETE("/accounts/:id", h.delete)
++	router.POST("/accounts/:id/clear-cooldown", h.clearCooldown)
+ 	router.POST("/accounts/:id/refresh-token", h.refreshToken)
+ 	router.POST("/accounts/:id/refresh-billing", h.refreshBilling)
+ 	router.POST("/accounts/:id/refresh-quota", h.refreshWebQuota)
+@@ -307,6 +308,9 @@ type accountResponse struct {
+ 	FailureCount               int                     `json:"failureCount"`
+ 	CooldownUntil              *time.Time              `json:"cooldownUntil,omitempty"`
+ 	LastError                  string                  `json:"lastError,omitempty"`
++	// EnabledDoesNotClearCooldown is set on PATCH when enabled was changed
++	// while the account is still cooling. Toggling enabled is not a health reset.
++	EnabledDoesNotClearCooldown bool `json:"enabledDoesNotClearCooldown,omitempty"`
+ 	LastUsedAt                 *time.Time              `json:"lastUsedAt,omitempty"`
+ 	LinkedAccountID            uint64                  `json:"linkedAccountId,omitempty,string"`
+ 	LinkedName                 string                  `json:"linkedAccountName,omitempty"`
+@@ -1255,6 +1259,9 @@ func (h *Handler) update(c *gin.Context) {
+ 		return
+ 	}
+ 	result := newAccountResponse(value)
++	if request.Enabled != nil && result.CooldownUntil != nil && time.Now().UTC().Before(*result.CooldownUntil) {
++		result.EnabledDoesNotClearCooldown = true
++	}
+ 	if request.BuildSuperEntitled != nil {
+ 		if synchronizer, ok := h.sync.(accountModelSynchronizer); ok {
+ 			result.ModelSyncFailed = synchronizer.SyncModels(c.Request.Context(), id) != nil
+@@ -1263,6 +1270,19 @@ func (h *Handler) update(c *gin.Context) {
+ 	response.Success(c, http.StatusOK, result)
+ }
+ 
++func (h *Handler) clearCooldown(c *gin.Context) {
++	id, ok := pathID(c)
++	if !ok {
++		return
++	}
++	value, err := h.service.ClearCooldown(c.Request.Context(), id)
++	if err != nil {
++		h.writeServiceError(c, "accountClearCooldownFailed", err, http.StatusInternalServerError, "清除账号冷却失败")
++		return
++	}
++	response.Success(c, http.StatusOK, newAccountResponse(value))
++}
++
+ func (h *Handler) delete(c *gin.Context) {
+ 	id, ok := pathID(c)
+ 	if !ok {
+diff --git a/backend/internal/transport/http/account/handler_test.go b/backend/internal/transport/http/account/handler_test.go
+index fdb1c23e..5030f767 100644
+--- a/backend/internal/transport/http/account/handler_test.go
++++ b/backend/internal/transport/http/account/handler_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"path/filepath"
++	"strconv"
+ 	"strings"
+ 	"sync/atomic"
+ 	"testing"
+@@ -224,6 +225,66 @@ func TestLinkedDeleteMissingAccountReturnsNotFound(t *testing.T) {
+ 	}
+ }
+ 
++func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	ctx := context.Background()
++	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "clear-cooldown.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer database.Close()
++	if err := database.InitializeSchema(ctx); err != nil {
++		t.Fatal(err)
++	}
++	repo := relational.NewAccountRepository(database)
++	until := time.Now().UTC().Add(24 * time.Hour)
++	created, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{
++		Provider: accountdomain.ProviderBuild, Name: "cooled", SourceKey: "cooled",
++		EncryptedAccessToken: "token", Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
++		Priority: 100, MaxConcurrent: 1,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.UpdateHealth(ctx, created.ID, created.Provider, 3, &until, "upstream status 504", false); err != nil {
++		t.Fatal(err)
++	}
++	service := accountapp.NewService(repo, nil, nil, nil, nil, nil, nil)
++	handler := NewHandler(service, nil)
++
++	recorder := httptest.NewRecorder()
++	ginContext, _ := gin.CreateTestContext(recorder)
++	ginContext.Params = []gin.Param{{Key: "id", Value: strconv.FormatUint(created.ID, 10)}}
++	ginContext.Request = httptest.NewRequest("POST", "/api/admin/v1/accounts/"+strconv.FormatUint(created.ID, 10)+"/clear-cooldown", nil)
++	handler.clearCooldown(ginContext)
++	if recorder.Code != 200 {
++		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
++	}
++	if strings.Contains(recorder.Body.String(), `"cooldownUntil"`) || strings.Contains(recorder.Body.String(), `"failureCount":3`) {
++		t.Fatalf("cooldown still present: %s", recorder.Body.String())
++	}
++	if !strings.Contains(recorder.Body.String(), `"failureCount":0`) {
++		t.Fatalf("failureCount not reset: %s", recorder.Body.String())
++	}
++
++	stored, err := repo.Get(ctx, created.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stored.FailureCount != 0 || stored.CooldownUntil != nil || stored.LastError != "" {
++		t.Fatalf("persisted health = failure=%d cooldown=%v last=%q", stored.FailureCount, stored.CooldownUntil, stored.LastError)
++	}
++
++	missing := httptest.NewRecorder()
++	missingCtx, _ := gin.CreateTestContext(missing)
++	missingCtx.Params = []gin.Param{{Key: "id", Value: "999999"}}
++	missingCtx.Request = httptest.NewRequest("POST", "/api/admin/v1/accounts/999999/clear-cooldown", nil)
++	handler.clearCooldown(missingCtx)
++	if missing.Code != 404 {
++		t.Fatalf("missing status = %d, body = %s", missing.Code, missing.Body.String())
++	}
++}
++
+ func (s *accountSynchronizerStub) Sync(_ context.Context, accountIDs ...uint64) accountsyncapp.Result {
+ 	s.accountIDs = append(s.accountIDs, accountIDs...)
+ 	return accountsyncapp.Result{Succeeded: len(accountIDs)}
+diff --git a/config.example.yaml b/config.example.yaml
+index be69a127..52cc1765 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -159,3 +159,7 @@ qualityGuard:
+     # First missing-thinking hit cools the account; a later hit after the
+     # cooldown expires disables it.
+     accountCooldown: 24h
++    # Empty SSE / idle-timeout penalty. Independent of accountCooldown.
++    # Single-account pools should set this lower; toggling enabled does not
++    # clear cooldown — use POST /api/admin/v1/accounts/:id/clear-cooldown.
++    idleAccountCooldown: 24h
+diff --git a/frontend/src/features/accounts/accounts-api.ts b/frontend/src/features/accounts/accounts-api.ts
+index 5e25d3a6..9de174ce 100644
+--- a/frontend/src/features/accounts/accounts-api.ts
++++ b/frontend/src/features/accounts/accounts-api.ts
+@@ -102,6 +102,7 @@ export type AccountDTO = {
+   failureCount: number;
+   cooldownUntil?: string;
+   lastError?: string;
++  enabledDoesNotClearCooldown?: boolean;
+   lastUsedAt?: string;
+   linkedAccountId?: string;
+   linkedAccountName?: string;
+@@ -193,6 +194,7 @@ const accountValidator = hasShape({
+   egressNodeId: isOptional(isString), egressAssignmentMode: isOptional(isOneOf("manual", "auto")),
+   lastRefreshErrorStatus: isOptional(isNumber), lastRefreshErrorCode: isOptional(isString), lastRefreshErrorMessage: isOptional(isString), lastRefreshErrorResponse: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
+   failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), lastUsedAt: isOptional(isString),
++  enabledDoesNotClearCooldown: isOptional(isBoolean),
+   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")), linkedAccounts: isOptional(isArrayOf(linkedAccountValidator)),
+   createdAt: isString, billing: isOptional(billingValidator), quota: quotaValidator, quotaWindows: isOptional(isArrayOf(quotaWindowValidator)),
+ });
+@@ -309,6 +311,10 @@ export function refreshAccountToken(id: string): Promise<AccountDTO> {
+   return apiRequest(`/api/admin/v1/accounts/${id}/refresh-token`, { method: "POST" }, decodeAccount);
+ }
+ 
++export function clearAccountCooldown(id: string): Promise<AccountDTO> {
++  return apiRequest(`/api/admin/v1/accounts/${id}/clear-cooldown`, { method: "POST" }, decodeAccount);
++}
++
+ export function acceptWebAccountTerms(id: string): Promise<{ completed: boolean }> {
+   return apiRequest(`/api/admin/v1/accounts/web/${id}/accept-terms`, { method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
+ }
+diff --git a/frontend/src/features/accounts/accounts-page.tsx b/frontend/src/features/accounts/accounts-page.tsx
+index e0c4185f..4e40f8a3 100644
+--- a/frontend/src/features/accounts/accounts-page.tsx
++++ b/frontend/src/features/accounts/accounts-page.tsx
+@@ -1,6 +1,6 @@
+ import { zodResolver } from "@hookform/resolvers/zod";
+ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+-import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
++import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, TimerOff, Trash2, TriangleAlert, Webhook } from "lucide-react";
+ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+ import { useForm, useWatch } from "react-hook-form";
+ import { useTranslation } from "react-i18next";
+@@ -37,6 +37,7 @@ import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/tabl
+ import {
+   acceptWebAccountTerms,
+   cleanupAccounts,
++  clearAccountCooldown,
+   deleteAccount,
+   deleteAccounts,
+   previewAccountDeletion,
+@@ -344,6 +345,7 @@ export function AccountsPage() {
+       if (entitlementChanged) void queryClient.invalidateQueries({ queryKey: ["models"] });
+       setEditing(null);
+       if (account.modelSyncFailed) toast.warning(t("accounts.updatedWithModelSyncFailure"));
++      else if (account.enabledDoesNotClearCooldown) toast.warning(t("accounts.enabledDoesNotClearCooldown"));
+       else toast.success(t("accounts.updated"));
+     },
+     onError: showError,
+@@ -507,6 +509,15 @@ export function AccountsPage() {
+     onError: showError,
+   });
+ 
++  const clearCooldownMutation = useMutation({
++    mutationFn: clearAccountCooldown,
++    onSuccess: () => {
++      invalidateAccountData();
++      toast.success(t("accounts.cooldownCleared"));
++    },
++    onError: showError,
++  });
++
+   const quotaMutation = useMutation({
+     mutationFn: refreshAccountQuota,
+     onSuccess: () => {
+@@ -1512,6 +1523,11 @@ export function AccountsPage() {
+                             />
+                           ) : null}
+                           {provider === "grok_build" ? <DropdownMenuItem onClick={() => tokenMutation.mutate(account.id)}><RotateCw />{t("accounts.refreshToken")}</DropdownMenuItem> : null}
++                          {account.cooldownUntil && new Date(account.cooldownUntil) > new Date() ? (
++                            <DropdownMenuItem onClick={() => clearCooldownMutation.mutate(account.id)} disabled={clearCooldownMutation.isPending}>
++                              <TimerOff />{t("accounts.clearCooldown")}
++                            </DropdownMenuItem>
++                          ) : null}
+                           <DropdownMenuItem onClick={() => provider === "grok_build" ? billingMutation.mutate(account.id) : quotaMutation.mutate(account.id)}><RefreshCw />{provider === "grok_build" ? t("accounts.refreshBilling") : t("accounts.refreshModeQuota")}</DropdownMenuItem>
+                           <DropdownMenuSeparator />
+                           <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => { resetLinkedDeleteState(); setDeleting(account); }}><Trash2 />{t("common.delete")}</DropdownMenuItem>
+diff --git a/frontend/src/shared/i18n/index.ts b/frontend/src/shared/i18n/index.ts
+index 8dea5ba8..c19b174d 100644
+--- a/frontend/src/shared/i18n/index.ts
++++ b/frontend/src/shared/i18n/index.ts
+@@ -2198,6 +2198,9 @@ Object.assign(resources["zh-CN"].translation.settings.egress as unknown as Recor
+ });
+ 
+ Object.assign(resources["zh-CN"].translation.accounts as unknown as Record<string, string>, {
++  clearCooldown: "解除冷却",
++  cooldownCleared: "账号冷却已清除，可重新调度",
++  enabledDoesNotClearCooldown: "已开关账号，但冷却状态未变。请用「解除冷却」清除 cooldownUntil。",
+   importAuth: "导入账号或 RT 文件", quickImportRT: "快速导入 RT",
+   quickImportRTTitle: "快速导入 Grok Build Refresh Token", quickImportRTDescription: "支持粘贴多个 xAI Refresh Token，或上传每行一个 RT 的 TXT 文件。导入时会先换取 access token，后续自动续期会沿用对应的 OAuth client ID。",
+   refreshTokens: "Refresh Token（每行一个）", refreshTokenPlaceholder: "refresh_token_1\nrt=refresh_token_2\nrefresh_token=refresh_token_3",
+@@ -2210,6 +2213,9 @@ Object.assign(resources["zh-CN"].translation.accounts as unknown as Record<strin
+ });
+ 
+ Object.assign(resources.en.translation.accounts as unknown as Record<string, string>, {
++  clearCooldown: "Clear cooldown",
++  cooldownCleared: "Account cooldown cleared; the account can be scheduled again",
++  enabledDoesNotClearCooldown: "Enabled state changed, but cooldown is unchanged. Use Clear cooldown to reset cooldownUntil.",
+   importAuth: "Import accounts or RTs", quickImportRT: "Quick import RTs",
+   quickImportRTTitle: "Quick import Grok Build refresh tokens", quickImportRTDescription: "Paste xAI refresh tokens or upload a TXT file with one RT per line. Import exchanges each RT for an access token, and later renewals retain its OAuth client ID.",
+   refreshTokens: "Refresh tokens (one per line)", refreshTokenPlaceholder: "refresh_token_1\nrt=refresh_token_2\nrefresh_token=refresh_token_3",
+-- 
+2.50.1 (Apple Git-155)
+

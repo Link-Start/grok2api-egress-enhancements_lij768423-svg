@@ -27,23 +27,26 @@ This is an unofficial enhancement distribution for [chenyme/grok2api](https://gi
 
 Current baseline:
 
-- Upstream release: `v3.1.3` / `main` `57746fc7` (quality guard and thinking guard are already upstream)
-- Today's delta: abort `response.incomplete` now includes `id` / `created_at` / `sequence_number` (`patches/0013-*.patch`, [#968](https://github.com/chenyme/grok2api/pull/968)) so Grok CLI does not serde-fail with `missing field id`
+- Upstream release: `v3.1.4` / `909bb810` (0006–0014 / #956–#959 #966–#968 are already upstream)
+- Today's delta: TUI hold evidence + serde required fields + empty-stream retry (`patches/0015-*.patch` … `0020-*.patch`, PRs #977–#981 #984)
 - Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`
 
 If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` (closed [#837](https://github.com/chenyme/grok2api/pull/837)).
 
 ## Features
 
-### Request-path missing-thinking hold (v3.1.3+)
+### Request-path missing-thinking hold (v3.1.4+)
 
-- Buffer thinking-model SSE until reasoning appears, or enough visible output arrives with none.
-- Missing thinking (`output ≥ 32`, `reasoning=0`) is **not delivered**. Another account is tried.
+- Buffer thinking-model SSE until **streamed** thinking appears (reasoning/summary deltas or `encrypted_content`). `usage.reasoning_tokens`, empty reasoning items, and the Chat SSE stub do **not** count.
+- Missing thinking (`output ≥ 32`, no streamed thinking) is **not delivered**. Another account is tried.
+- Grok TUI always sends a `tools` schema, and the next turn after local tools already contains `function_call_output`. Both still hold.
+- Empty `response.completed` / `[DONE]` fails immediately as `upstream_stream_empty` instead of waiting for idle under HTTP 200.
+- Abort trailers emit `response.failed` with required `model`; `output_text.annotations` is filled as `[]`. TUI 0.2.93 treats `response.incomplete` as fatal truncation.
 - Up to 6 attempts (first + 5 switches). All misses → `503 quality_degraded`.
 - First miss: 24h scheduling cooldown (`accountCooldown`). A later miss after that cooldown disables the account.
+- Empty-stream penalty is `idleAccountCooldown`; `POST /api/admin/v1/accounts/:id/clear-cooldown` clears it.
+- Grok TUI compaction still sets `skipQualityHold`. Do not inject `compaction_trigger`.
 - Off by default: `qualityGuard.requestRetry.enabled: false`.
-- Grok TUI compaction is a normal `/v1/responses` turn whose last user item is the grok-build summary prompt. Tag it `operation=compaction` and skip the hold. Do not inject `compaction_trigger`.
-- A 0-token hold expire is not fail-open. Upstream idle retries another account and, if headers are already flushed, writes an SSE error + `[DONE]` so Sub2API does not wrap an incomplete stream as 500.
 
 ### Immediate fixed-proxy recovery
 
@@ -82,7 +85,7 @@ If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-ad
 
 ### CPA-native egress guard plugin
 
-`cpa-plugin/` is now the **v1.1.0 pure-CPA plugin** (same features as 1.0.9; this release ships grok2api patches 0006–0009). It has no runtime dependency on Grok2API: it uses CPA Host APIs for auth files and usage events, binds `proxy_url` stickily to egress nodes, and provides node CRUD, line-based bulk import, batch operations, connectivity/real-model tests, configurable probe profiles (throughput / expected-marker / custom prompt), quarantine migration, hot-reloadable policy, statistics, events, and light/dark themes. In v1.0.9, active probes can verify a last-line or regex marker. In v1.0.8, store-install registration no longer blocks on a full auth scan (fixes plugins stuck as inactive/unregistered with many accounts). In v1.0.7, CPA scheduling skips quarantined or cooling egresses; credential, quota, and permission failures are recorded as ignored instead of quarantining a node; migrations are read-back verified; and an optional allowlisted internal IP-rotation webhook is available. See [cpa-plugin/README.md](./cpa-plugin/README.md) for build instructions and the Chinese [AI deployment and operations guide](./cpa-plugin/AI_USAGE_GUIDE.md) for proxy topology, capacity planning, quarantine recovery, and forced residential-IP rotation.
+`cpa-plugin/` is now the **v1.1.0 pure-CPA plugin** (same features as 1.0.9; this docs drop ships grok2api patches 0015–0020). It has no runtime dependency on Grok2API: it uses CPA Host APIs for auth files and usage events, binds `proxy_url` stickily to egress nodes, and provides node CRUD, line-based bulk import, batch operations, connectivity/real-model tests, configurable probe profiles (throughput / expected-marker / custom prompt), quarantine migration, hot-reloadable policy, statistics, events, and light/dark themes. In v1.0.9, active probes can verify a last-line or regex marker. In v1.0.8, store-install registration no longer blocks on a full auth scan (fixes plugins stuck as inactive/unregistered with many accounts). In v1.0.7, CPA scheduling skips quarantined or cooling egresses; credential, quota, and permission failures are recorded as ignored instead of quarantining a node; migrations are read-back verified; and an optional allowlisted internal IP-rotation webhook is available. See [cpa-plugin/README.md](./cpa-plugin/README.md) for build instructions and the Chinese [AI deployment and operations guide](./cpa-plugin/AI_USAGE_GUIDE.md) for proxy topology, capacity planning, quarantine recovery, and forced residential-IP rotation.
 
 For the recommended end-to-end topology (residential/Resin -> Mihomo sharding and listeners -> Grok2API/CPA egress nodes -> Quality Guard detection, drain, rotation, and re-probing), see [Recommended egress deployment](./docs/RECOMMENDED_DEPLOYMENT.md).
 
@@ -97,17 +100,16 @@ From a clean grok2api checkout:
 
 ```sh
 git fetch --tags origin
-git checkout -b egress-enhancements v3.1.2
-git am --3way /path/to/grok2api-egress-enhancements/patches/0002-feat-add-degraded-account-monitor.patch
-git am --3way /path/to/grok2api-egress-enhancements/patches/0003-feat-add-quality-guard-probe-profiles.patch
-git am --3way /path/to/grok2api-egress-enhancements/patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch
-git am --3way /path/to/grok2api-egress-enhancements/patches/0005-fix-missing-thinking-32-token-floor.patch
-# On current official main (thinking guard already merged), apply only 0006:
-git checkout -b request-quality-hold-retry origin/main
-git am --3way /path/to/grok2api-egress-enhancements/patches/0006-feat-request-quality-hold-retry.patch
+git checkout -b tui-hold-serde v3.1.4
+git am --3way /path/to/grok2api-egress-enhancements/patches/0015-fix-quality-thinking-evidence.patch
+git am --3way /path/to/grok2api-egress-enhancements/patches/0016-fix-responses-annotations.patch
+git am --3way /path/to/grok2api-egress-enhancements/patches/0017-fix-hold-tui-tool-turns.patch
+git am --3way /path/to/grok2api-egress-enhancements/patches/0018-fix-empty-completed-retry.patch
+git am --3way /path/to/grok2api-egress-enhancements/patches/0019-fix-clear-account-cooldown.patch
+git am --3way /path/to/grok2api-egress-enhancements/patches/0020-fix-responses-abort-failed-model.patch
 ```
 
-On `v3.0.11`, apply `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` instead. For newer upstream versions, follow [AI_MERGE_GUIDE.md](./docs/AI_MERGE_GUIDE.md) and resolve conflicts according to the documented invariants instead of replacing newer files wholesale.
+Easier: clone [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`. Do not `git am` 0006–0014 onto v3.1.4. On `v3.0.11`, apply `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` instead. For newer upstream versions, follow [AI_MERGE_GUIDE.md](./docs/AI_MERGE_GUIDE.md).
 
 ## Validate
 

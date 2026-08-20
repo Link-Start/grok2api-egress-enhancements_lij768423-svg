@@ -1,6 +1,6 @@
 # AI 合并指南
 
-这份指南用于把补丁移植到高于当前基线的 grok2api。当前主补丁是 `v3.1.2` 上的降智账号面板；`v3.0.11` 的质量守护补丁仅作遗留。推荐把目标仓库放在干净分支中，只向 AI 工具提供源码、补丁和脱敏后的测试错误。
+这份指南用于把补丁移植到高于当前基线的 grok2api。当前主补丁是 `v3.1.4` 上的 TUI hold / serde（0015–0020）；0006–0014 已合进官方 v3.1.4；`v3.0.11` 的质量守护补丁仅作遗留。推荐把目标仓库放在干净分支中，只向 AI 工具提供源码、补丁和脱敏后的测试错误。
 
 本页只描述 Grok2API 补丁移植。纯 CPA 插件的安装、代理规划、账号容量、隔离恢复和强制住宅 IP 轮换请单独阅读 [CPA 出口守护 AI 部署与运维指南](../cpa-plugin/AI_USAGE_GUIDE.md)，不要把两套运行时混为一体。
 
@@ -19,12 +19,18 @@
 增量补丁（缺思考 24h 冷却 / 再犯禁用 + 降智列表）：patches/0010-feat-missing-thinking-cooldown-and-degrade-list.patch
 增量补丁（TUI 压缩不当无思考）：patches/0011-fix-skip-tui-compaction-quality-hold.patch
 增量补丁（空 hold / idle 不再 fail-open 成 200）：patches/0012-fix-empty-hold-idle-sse.patch
-增量补丁（incomplete 补齐 id/created_at）：patches/0013-fix-incomplete-response-id.patch
+增量补丁（incomplete 补齐 id/created_at，已在 v3.1.4）：patches/0013-fix-incomplete-response-id.patch
+live 补丁（TUI hold 证据）：patches/0015-fix-quality-thinking-evidence.patch
+live 补丁（serde annotations）：patches/0016-fix-responses-annotations.patch
+live 补丁（TUI tools / after-tool 也 hold）：patches/0017-fix-hold-tui-tool-turns.patch
+live 补丁（空 completed 立刻失败）：patches/0018-fix-empty-completed-retry.patch
+live 补丁（清冷却 + idleAccountCooldown）：patches/0019-fix-clear-account-cooldown.patch
+live 补丁（abort response.failed + model）：patches/0020-fix-responses-abort-failed-model.patch
 遗留补丁（仅 v3.0.11）：patches/0001-feat-add-egress-recovery-and-quality-guard.patch
 设计说明：docs/FEATURES.md
 
 要求：
-1. 先阅读目标仓库当前的出口节点、代理池、请求审计、管理员路由和前端结构。目标已是当前官方 main（#959 已合入）时打 0010，再打 0011，再打 0012，再打 0013。目标仍是干净 v3.1.2 时先打 0002–0005 再打 0006，再打 0010/0011/0012/0013。不要再打 0001。
+1. 先阅读目标仓库当前的出口节点、代理池、请求审计、管理员路由和前端结构。目标已是官方 v3.1.4 时只打 0015–0020（按编号顺序）。不要再打 0006–0014。目标仍是干净 v3.1.2 时先打 0002–0005 再打 0006。不要再打 0001。
 2. 使用 git am --3way 尝试应用补丁；有冲突时按语义移植，不得整文件覆盖新版实现。
 3. 保留目标版本新增的数据库字段、API、路由策略、鉴权中间件和 UI 行为。
 4. 固定代理快速恢复必须保持：先持久化冷却，再启动按节点合并的独立探针；绑定请求限时等待；健康后重新读取状态；不健康维持冷却；请求取消立即退出。
@@ -44,21 +50,35 @@
 18. GET /api/admin/v1/request-audits/degrade-accounts 必须走管理员鉴权。批量禁/解禁必须复用现有账号 batch API，ids 为字符串数组。
 19. 不得读取或修改真实 .env、config.yaml、数据库、状态卷或生产代理配置。
 20. 完成后运行 Go 全量测试、质量守护与轮换器单测、前端 lint/build，并列出所有语义冲突和处理方式。
+21. ClassifyQualityHold 只能把流式 reasoning/summary delta 或 `encrypted_content` 当 thinking。`usage.reasoning_tokens`、空 reasoning item、Chat stub 必须继续 withhold。
+22. `tools` / `functions` schema 以及 `function_call_output` / `tool_result` / `role=tool` 都不得 skip hold。TUI 工具是本地执行的。
+23. `response.completed` / `[DONE]` 且 0 token 必须立刻 `errQualityEmptyStream`，不得再等到 idle timeout 才给 HTTP 200。
+24. Responses abort trailer 必须是 `response.failed`（不是 `incomplete`），且 `response.model` 必填；`output_text.annotations` 缺省为 `[]`。
+25. `idleAccountCooldown` 与 `accountCooldown` 分开；`POST /api/admin/v1/accounts/:id/clear-cooldown` 必须能解开空流惩罚。
 ```
 
 ## 手工起点
 
 ```sh
-git checkout -b port-egress-enhancements v3.1.2
-git am --3way patches/0002-feat-add-degraded-account-monitor.patch
-git am --3way patches/0003-feat-add-quality-guard-probe-profiles.patch
-git am --3way patches/0004-fix-dual-probe-recovery-and-thinking-guard.patch
-git am --3way patches/0005-fix-missing-thinking-32-token-floor.patch
+git checkout -b port-tui-hold-serde v3.1.4
+git am --3way patches/0015-fix-quality-thinking-evidence.patch
+git am --3way patches/0016-fix-responses-annotations.patch
+git am --3way patches/0017-fix-hold-tui-tool-turns.patch
+git am --3way patches/0018-fix-empty-completed-retry.patch
+git am --3way patches/0019-fix-clear-account-cooldown.patch
+git am --3way patches/0020-fix-responses-abort-failed-model.patch
 ```
 
 如果 `git am` 停在冲突状态，让 AI 工具先运行 `git status`，逐个读取冲突文件的新版上下文和补丁对应 hunk。不要使用 `git checkout --theirs` 批量覆盖。
 
 ## 高概率冲突位置
+
+v3.1.4 TUI hold / serde：
+
+- `backend/internal/application/gateway/quality_retry.go` / `quality_retry_scan.go` / `quality_retry_test.go`
+- `backend/internal/transport/http/inference/handler.go` / `responses_compat.go`
+- `backend/internal/transport/http/account/handler.go`（clear-cooldown）
+- `backend/internal/infra/config/config.go` + `config.example.yaml`（idleAccountCooldown）
 
 v3.1.2 降智补丁：
 

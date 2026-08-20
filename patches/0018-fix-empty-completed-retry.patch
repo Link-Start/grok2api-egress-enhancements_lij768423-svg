@@ -1,0 +1,94 @@
+From dc87764154d6b7439d604c74207a5d09bad45950 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Thu, 20 Aug 2026 01:09:37 +0800
+Subject: [PATCH] fix: retry empty completed streams instead of waiting for
+ idle
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+response.completed / [DONE] with zero tokens used to keep the quality
+hold in Wait until the idle timeout. The client already had HTTP 200
+headers and saw a 50–120s Retrying spinner.
+
+Finish the peek immediately and surface errQualityEmptyStream so the
+attempt loop rotates. Open empty hangs still wait for idle and do not
+fail-open as HTTP 200.
+---
+ .../application/gateway/quality_retry_scan.go |  6 +++
+ .../application/gateway/quality_retry_test.go | 42 +++++++++++++++++++
+ 2 files changed, 48 insertions(+)
+
+diff --git a/backend/internal/application/gateway/quality_retry_scan.go b/backend/internal/application/gateway/quality_retry_scan.go
+index 3a29d8b9..0d57a530 100644
+--- a/backend/internal/application/gateway/quality_retry_scan.go
++++ b/backend/internal/application/gateway/quality_retry_scan.go
+@@ -376,6 +376,12 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
+ 		if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
+ 			return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
+ 		}
++		// A completed empty stream must rotate immediately. Waiting for idle
++		// timeout after response.completed / [DONE] surfaces HTTP 200 with 0
++		// tokens and makes Grok TUI retry for 50–120s.
++		if sig.Terminal {
++			return finishQualityPeek(&held, pump, &state, cfg)
++		}
+ 
+ 		select {
+ 		case <-ctx.Done():
+diff --git a/backend/internal/application/gateway/quality_retry_test.go b/backend/internal/application/gateway/quality_retry_test.go
+index 3c0035d8..a37aad1a 100644
+--- a/backend/internal/application/gateway/quality_retry_test.go
++++ b/backend/internal/application/gateway/quality_retry_test.go
+@@ -461,6 +461,48 @@ func TestPeekQualityStreamHoldTimeoutEmptyDoesNotFailOpen(t *testing.T) {
+ 	}
+ }
+ 
++func TestPeekQualityStreamEmptyCompletedRetriesWithoutIdle(t *testing.T) {
++	t.Parallel()
++	started := time.Now()
++	replay, verdict, _, _, err := peekQualityStream(
++		context.Background(),
++		io.NopCloser(strings.NewReader(sse(
++			`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":0}}}`,
++		))),
++		qualityProtocolResponses,
++		QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: 2 * time.Second},
++	)
++	if replay != nil {
++		defer replay.Close()
++	}
++	if !errors.Is(err, errQualityEmptyStream) {
++		t.Fatalf("peek error = %v, want empty stream", err)
++	}
++	if verdict != QualityWait {
++		t.Fatalf("verdict = %s, want wait so the attempt loop retries as transport", verdict)
++	}
++	if time.Since(started) > 500*time.Millisecond {
++		t.Fatalf("empty completed stream waited %s, want immediate retry", time.Since(started))
++	}
++
++	started = time.Now()
++	replay, verdict, _, _, err = peekQualityStream(
++		context.Background(),
++		io.NopCloser(strings.NewReader(sse("data: [DONE]"))),
++		qualityProtocolChat,
++		QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: 2 * time.Second},
++	)
++	if replay != nil {
++		defer replay.Close()
++	}
++	if !errors.Is(err, errQualityEmptyStream) {
++		t.Fatalf("chat empty [DONE] peek error = %v, want empty stream", err)
++	}
++	if time.Since(started) > 500*time.Millisecond {
++		t.Fatalf("empty chat [DONE] waited %s, want immediate retry", time.Since(started))
++	}
++}
++
+ func TestPeekQualityStreamEmptyEOFRequestsAnotherAccount(t *testing.T) {
+ 	t.Parallel()
+ 	replay, verdict, _, _, err := peekQualityStream(
+-- 
+2.50.1 (Apple Git-155)
+

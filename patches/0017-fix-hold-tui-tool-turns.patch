@@ -1,0 +1,210 @@
+From 731e95b9242ad4d2b521ff3955d95b2b0f478a91 Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Thu, 20 Aug 2026 01:08:34 +0800
+Subject: [PATCH 1/2] fix: hold TUI tool-schema turns, skip only in-flight tool
+ results
+
+Grok TUI declares a tools array on every agent request, including the
+first thinking turn. Skipping hold on that schema forwarded
+missing-thinking streams as HTTP 200.
+
+Keep the replay-safety skip for in-flight tool output
+(function_call_output, tool_result, role=tool). Compact skip and
+previous_response_id pinning are unchanged.
+---
+ .../application/gateway/quality_retry.go      | 45 ++++++++++++++++---
+ .../application/gateway/quality_retry_test.go | 36 +++++++++++++--
+ 2 files changed, 72 insertions(+), 9 deletions(-)
+
+diff --git a/backend/internal/application/gateway/quality_retry.go b/backend/internal/application/gateway/quality_retry.go
+index 78cd164e..bccf06c2 100644
+--- a/backend/internal/application/gateway/quality_retry.go
++++ b/backend/internal/application/gateway/quality_retry.go
+@@ -270,10 +270,11 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
+ 	if route.Provider != accountdomain.ProviderBuild && route.Provider != accountdomain.ProviderConsole {
+ 		return false
+ 	}
+-	// Retrying a tool-capable request can repeat external side effects. Tool
+-	// requests remain outside this feature until they have their own replay
+-	// safety contract.
+-	if qualityRequestUsesTools(input.Body) {
++	// Retrying an in-flight tool *result* can repeat external side effects.
++	// Grok TUI always declares a tools schema even on the first thinking
++	// turn; skipping that schema would disable the hold for every agent
++	// request. Only skip when the body already contains tool output.
++	if qualityRequestHasInFlightToolResults(input.Body) {
+ 		return false
+ 	}
+ 	// Aliases are rewritten before this gate, so inspect the effective request
+@@ -289,11 +290,43 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
+ }
+ 
+ func qualityRequestUsesTools(body []byte) bool {
+-	var payload map[string]json.RawMessage
++	return qualityRequestHasInFlightToolResults(body)
++}
++
++func qualityRequestHasInFlightToolResults(body []byte) bool {
++	var payload any
+ 	if json.Unmarshal(body, &payload) != nil {
+ 		return false
+ 	}
+-	return nonEmptyJSONCollection(payload["tools"]) || nonEmptyJSONCollection(payload["functions"])
++	return jsonTreeHasInFlightToolResult(payload)
++}
++
++func jsonTreeHasInFlightToolResult(node any) bool {
++	switch typed := node.(type) {
++	case map[string]any:
++		role := jsonNodeString(typed["role"])
++		typ := jsonNodeString(typed["type"])
++		if role == "tool" || typ == "function_call_output" || typ == "tool_result" || typ == "tool_use_output" {
++			return true
++		}
++		for _, child := range typed {
++			if jsonTreeHasInFlightToolResult(child) {
++				return true
++			}
++		}
++	case []any:
++		for _, child := range typed {
++			if jsonTreeHasInFlightToolResult(child) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++func jsonNodeString(value any) string {
++	text, _ := value.(string)
++	return strings.ToLower(strings.TrimSpace(text))
+ }
+ 
+ func qualityRequestDisablesReasoning(body []byte) bool {
+diff --git a/backend/internal/application/gateway/quality_retry_test.go b/backend/internal/application/gateway/quality_retry_test.go
+index 3c0035d8..1df6e136 100644
+--- a/backend/internal/application/gateway/quality_retry_test.go
++++ b/backend/internal/application/gateway/quality_retry_test.go
+@@ -560,14 +560,44 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
+ 		{name: "responses reasoning none", body: `{"reasoning":{"effort":"none"}}`},
+ 		{name: "messages thinking disabled", body: `{"thinking":{"type":"disabled"}}`},
+ 		{name: "messages zero thinking budget", body: `{"thinking":{"type":"enabled","budget_tokens":0}}`},
+-		{name: "client tools", body: `{"tools":[{"type":"function","function":{"name":"charge"}}]}`},
+-		{name: "legacy functions", body: `{"functions":[{"name":"charge"}]}`},
+ 	} {
+ 		t.Run(test.name, func(t *testing.T) {
+ 			request := input
+ 			request.Body = []byte(test.body)
+ 			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+-				t.Fatal("explicitly disabled reasoning and tool requests must not be held")
++				t.Fatal("explicitly disabled reasoning must not be held")
++			}
++		})
++	}
++	for _, test := range []struct {
++		name string
++		body string
++	}{
++		{name: "client tools schema", body: `{"tools":[{"type":"function","function":{"name":"charge"}}]}`},
++		{name: "legacy functions schema", body: `{"functions":[{"name":"charge"}]}`},
++		{name: "tui tools schema plus user input", body: `{"model":"grok-4.6","tools":[{"type":"function","name":"read_file"}],"input":[{"role":"user","content":"hello"}]}`},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			request := input
++			request.Body = []byte(test.body)
++			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
++				t.Fatal("tools schema alone must still hold so TUI thinking turns are classified")
++			}
++		})
++	}
++	for _, test := range []struct {
++		name string
++		body string
++	}{
++		{name: "function_call_output", body: `{"input":[{"type":"function_call_output","call_id":"call_1","output":"done"}]}`},
++		{name: "tool_result", body: `{"input":[{"type":"tool_result","tool_use_id":"tool_1","content":"done"}]}`},
++		{name: "role tool", body: `{"messages":[{"role":"tool","content":"done"}]}`},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			request := input
++			request.Body = []byte(test.body)
++			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
++				t.Fatal("in-flight tool results must not be held")
+ 			}
+ 		})
+ 	}
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 9bb6b48549e3615db92ef44037335a1d4cafabfa Mon Sep 17 00:00:00 2001
+From: lij768423-svg <lij768423@gmail.com>
+Date: Thu, 20 Aug 2026 11:43:23 +0800
+Subject: [PATCH 2/2] fix: hold TUI after-tool turns instead of skipping
+ in-flight results
+
+Grok TUI tools run locally. The next /v1/responses body already contains
+function_call_output; retrying it on another account only regenerates the
+model turn and does not re-execute tools. Skipping hold on that body let
+0-thinking dumps through on the common agent loop.
+---
+ .../application/gateway/quality_retry.go         | 16 +++++-----------
+ .../application/gateway/quality_retry_test.go    |  7 +++++--
+ 2 files changed, 10 insertions(+), 13 deletions(-)
+
+diff --git a/backend/internal/application/gateway/quality_retry.go b/backend/internal/application/gateway/quality_retry.go
+index bccf06c2..c1ac2760 100644
+--- a/backend/internal/application/gateway/quality_retry.go
++++ b/backend/internal/application/gateway/quality_retry.go
+@@ -270,13 +270,11 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
+ 	if route.Provider != accountdomain.ProviderBuild && route.Provider != accountdomain.ProviderConsole {
+ 		return false
+ 	}
+-	// Retrying an in-flight tool *result* can repeat external side effects.
+-	// Grok TUI always declares a tools schema even on the first thinking
+-	// turn; skipping that schema would disable the hold for every agent
+-	// request. Only skip when the body already contains tool output.
+-	if qualityRequestHasInFlightToolResults(input.Body) {
+-		return false
+-	}
++	// Grok TUI always declares a tools schema, and after local tools run the
++	// next /v1/responses body already contains function_call_output. Retrying
++	// that body on another account does not re-execute TUI tools — it only
++	// regenerates the model turn. Skipping hold here let 0-thinking dumps
++	// through on the common agent loop. Keep holding.
+ 	// Aliases are rewritten before this gate, so inspect the effective request
+ 	// body instead of only the reasoning-capable base model. In particular,
+ 	// grok-4.3-none becomes grok-4.3 plus an explicit disabled setting.
+@@ -289,10 +287,6 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
+ 	return modeldomain.SupportsReasoningForProvider(route.Provider, route.UpstreamModel)
+ }
+ 
+-func qualityRequestUsesTools(body []byte) bool {
+-	return qualityRequestHasInFlightToolResults(body)
+-}
+-
+ func qualityRequestHasInFlightToolResults(body []byte) bool {
+ 	var payload any
+ 	if json.Unmarshal(body, &payload) != nil {
+diff --git a/backend/internal/application/gateway/quality_retry_test.go b/backend/internal/application/gateway/quality_retry_test.go
+index 1df6e136..f2c2a52f 100644
+--- a/backend/internal/application/gateway/quality_retry_test.go
++++ b/backend/internal/application/gateway/quality_retry_test.go
+@@ -596,8 +596,11 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
+ 		t.Run(test.name, func(t *testing.T) {
+ 			request := input
+ 			request.Body = []byte(test.body)
+-			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+-				t.Fatal("in-flight tool results must not be held")
++			if !qualityRequestHasInFlightToolResults(request.Body) {
++				t.Fatal("fixture must still be detected as tool output")
++			}
++			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
++				t.Fatal("in-flight tool results must still be held so 0-thinking agent turns are classified")
+ 			}
+ 		})
+ 	}
+-- 
+2.50.1 (Apple Git-155)
+

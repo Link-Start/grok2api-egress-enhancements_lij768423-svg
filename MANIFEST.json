@@ -1,90 +1,74 @@
 {
   "schema": 1,
   "upstream_repository": "https://github.com/chenyme/grok2api",
-  "upstream_tag": "v3.1.3",
-  "upstream_commit": "57746fc70289fcbab4bf33db33c521cf756ebbb9",
+  "upstream_tag": "v3.1.4",
+  "upstream_commit": "909bb8109fcc",
   "runnable_fork": "https://github.com/lij768423-svg/grok2api",
-  "runnable_note": "Fork main = official main + missing-thinking 24h cooldown / second-strike disable + degrade-accounts thinking list (#966) + TUI compaction hold skip (#967) + empty-hold idle SSE terminal (#968). Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
+  "runnable_note": "Fork main = official v3.1.4 + #977 #978 #979 #980 #981 #984. Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
   "patches": [
     {
-      "id": "0014",
-      "file": "patches/0014-fix-responses-cli-ids.patch",
-      "sha256": "6323046d2a7aa3300f83b05534bb8f95a5c06ca7ed6c5147e7375ff9103dd462",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/968",
-      "patch_commit": "871824039335769f88aaeeecbd39b9677b484d09",
-      "implements": "fill Responses event/item/error ids so Grok CLI does not serde-fail"
+      "id": "0015",
+      "file": "patches/0015-fix-quality-thinking-evidence.patch",
+      "sha256": "5183d1da8e2f424694ca50a788094a5d491d058257d973e003e39770cf70be56",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/977",
+      "patch_commit": "c9c10a3fbd91180a4329c8c23b2d68d299fec030",
+      "implements": "only streamed thinking (deltas / encrypted_content) counts as hold evidence"
     },
     {
-      "id": "0013",
-      "file": "patches/0013-fix-incomplete-response-id.patch",
-      "sha256": "9e91ae99f86aa0a70d0f362db4fe9a77385b72559e8e1750d7db873a804dd3e6",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/968",
-      "patch_commit": "5e9166b6fc047d67470de45cca9db22711a95cf0",
-      "implements": "abort trailer includes response id/created_at/sequence_number for Grok CLI"
+      "id": "0016",
+      "file": "patches/0016-fix-responses-annotations.patch",
+      "sha256": "a74711d382a295d0c9e38dbb22cc116061c5799705d207e48979d8148aec8987",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/978",
+      "patch_commit": "68e58814336646c2aececb3b05f1489c8b1fedd9",
+      "implements": "fill required output_text.annotations for Grok CLI serde"
     },
     {
-      "id": "0012",
-      "file": "patches/0012-fix-empty-hold-idle-sse.patch",
-      "sha256": "9e5c9415752ebde0fc6ffdde6a09674f03e272611fec32a1eea77dac67cfc7c4",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/968",
-      "patch_commit": "89a33056c24f588de62fd3b713c22b6e15c934f3",
-      "implements": "do not fail-open empty held streams; idle retries with SSE terminal event"
+      "id": "0017",
+      "file": "patches/0017-fix-hold-tui-tool-turns.patch",
+      "sha256": "755a8f5eb64cd9be8b50135fc33b38f69c91de849a14ada418b87140e2683ca3",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/979",
+      "patch_commit": "9bb6b48549e3615db92ef44037335a1d4cafabfa",
+      "implements": "hold TUI tools-schema and after-tool (function_call_output) turns"
     },
     {
-      "id": "0011",
-      "file": "patches/0011-fix-skip-tui-compaction-quality-hold.patch",
-      "sha256": "317e9ce1b71e5441111bcef34091641ac20083284ed52973b3236ea31e1eb2bf",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/967",
-      "patch_commit": "e3420857e903363af4867b0f8f8dbe1779d83c31",
-      "implements": "skip quality hold for Grok TUI compaction summary prompts"
+      "id": "0018",
+      "file": "patches/0018-fix-empty-completed-retry.patch",
+      "sha256": "714df4f68cbb805671a84a106ed36d7b2ec09d6118681ab7b94be39c57b000b7",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/980",
+      "patch_commit": "dc87764154d6b7439d604c74207a5d09bad45950",
+      "implements": "retry empty completed streams immediately instead of waiting for idle"
     },
     {
-      "id": "0010",
-      "file": "patches/0010-feat-missing-thinking-cooldown-and-degrade-list.patch",
-      "sha256": "18cd40741bb2ca033774b0028af610015bd567534a93696ae5d9b97a8b8c1c10",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/966",
-      "patch_commit": "52addf90df1dce9345b66dd28afd3a5f285d2ef9",
-      "implements": "24h missing-thinking cooldown, second-strike disable, degrade-accounts thinking list"
+      "id": "0019",
+      "file": "patches/0019-fix-clear-account-cooldown.patch",
+      "sha256": "4170acd930d317e4dad6d8edccb60c0d5c296103ea8fff331a0a9b20a2a04794",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/981",
+      "patch_commit": "78c17a83b3a42a750c522b96228189718ed32b86",
+      "implements": "POST clear-cooldown + configurable idleAccountCooldown"
     },
     {
-      "id": "0006",
-      "file": "patches/0006-feat-request-quality-hold-retry.patch",
-      "sha256": "433d20fec1ea5caea039f5cbcec971b6c26c3095440818cb7b074479b24d9507",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/959",
-      "patch_commit": "506b4e46f9567308ca18494593e6a4d932f40852",
-      "implements": "request-path missing-thinking withhold + account retry"
-    },
-    {
-      "id": "0007",
-      "file": "patches/0007-fix-compaction-session-drift.patch",
-      "sha256": "4edd96308624daadf9f97f4093d5f84feb4d7974c0b509cc6e46c429bdfc08ff",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/956",
-      "patch_commit": "ae6447e5a1fcc78001448b8e7e93908bd7e2e467",
-      "implements": "keep compaction summary when session key drifts"
-    },
-    {
-      "id": "0008",
-      "file": "patches/0008-feat-auto-assign-migration-bounds.patch",
-      "sha256": "a2348e6f77c696f69b7e9ebbb566f9d35de28d61e9c40959b4aac59acf89dd86",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/957",
-      "patch_commit": "ae05b4f749443969d554a9b2c6954328286d5807",
-      "implements": "auto-assign node share and per-cycle migration caps"
-    },
-    {
-      "id": "0009",
-      "file": "patches/0009-fix-quality-guard-base-url.patch",
-      "sha256": "d7801ddc867e90c519e179dd32d305ec23db3ca0402891b6df777d1260add9ba",
-      "upstream_pr": "https://github.com/chenyme/grok2api/pull/958",
-      "patch_commit": "08f732bab2b2f67d633c59b81e4b6a15eae099de",
-      "implements": "quality-guard sidecar GROK2API_BASE_URL",
-      "also_in": "sidecar/quality_guard.py"
+      "id": "0020",
+      "file": "patches/0020-fix-responses-abort-failed-model.patch",
+      "sha256": "e0fd17eed6c35dbbd211e4635ab81f6570bd3beed5d9dd277feda4ac35b57f63",
+      "upstream_pr": "https://github.com/chenyme/grok2api/pull/984",
+      "patch_commit": "24ce972b37941e5e084a18d13ebe1cdb321166ee",
+      "implements": "abort trailer response.failed with required model field"
     }
   ],
-  "applies_on": "chenyme/grok2api current main (a4b33d47+). 0010\u20130014 apply on official main after #959. Prefer the fork if you want 0006\u20130014 together.",
+  "applies_on": "chenyme/grok2api v3.1.4 / 909bb810. git am 0015–0020 in order. 0015/0017/0018 all touch quality_retry*; use the fork if you want them together.",
   "previous": {
-    "patch_file": "patches/0005-fix-missing-thinking-32-token-floor.patch",
-    "upstream_pr": "https://github.com/chenyme/grok2api/pull/930",
-    "note": "0005 is already in official main."
+    "upstream_tag": "v3.1.4 already contains",
+    "patches": ["0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014"],
+    "upstream_prs": [
+      "https://github.com/chenyme/grok2api/pull/959",
+      "https://github.com/chenyme/grok2api/pull/956",
+      "https://github.com/chenyme/grok2api/pull/957",
+      "https://github.com/chenyme/grok2api/pull/958",
+      "https://github.com/chenyme/grok2api/pull/966",
+      "https://github.com/chenyme/grok2api/pull/967",
+      "https://github.com/chenyme/grok2api/pull/968"
+    ],
+    "note": "0006–0014 are already in official v3.1.4. Do not am them onto v3.1.4."
   },
   "legacy": {
     "upstream_tag": "v3.0.11",
