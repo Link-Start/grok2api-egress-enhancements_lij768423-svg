@@ -10,17 +10,19 @@
 
 ## 请求路径缺 thinking 拦截
 
-思考模型的流式响应在写出给客户端之前先扣住。只有真正流式 thinking 才放行：reasoning/summary delta 或 reasoning item 上的 `encrypted_content`。`usage.reasoning_tokens`、空 reasoning item、Chat SSE stub **不是**证据——降智上游会填这些字段然后直接吐可见 token。
+思考模型的流式响应在写出给客户端之前先扣住。只有真正流式 thinking 才放行：reasoning/summary delta，或 reasoning item 上达到密文 floor 的 `encrypted_content` / Anthropic signature。短 stub（`gAAAA-cipher`）、`usage.reasoning_tokens`、空 reasoning item、Chat SSE stub **不是**证据。floor = `max(minEncryptedBytes, reasoning_tokens × encryptedBytesPerReasoningToken)`，默认 256B / 4。
 
-可见输出 ≥ `minOutputTokens`（默认 32）且全程无流式 thinking，记为降智：**不发给用户**，排除该账号再打。最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503` + `error_code=quality_degraded`，不把最后一枪无推理正文发出去。
+hold 到期时若仍无可见输出，`HoldExpired` 写在 scan state 上；后面才涌出的短问候 + 高 reasoning（TUI「你好」）继续扣。刚过 floor 又在 1s 内刷可见输出也扣。
+
+可见输出 ≥ `minOutputTokens`（fork / 推荐值 8）且全程无流式 thinking，记为降智：**不发给用户**，排除该账号再打。最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503` + `error_code=quality_degraded`，不把最后一枪无推理正文发出去。
 
 Grok TUI 每一轮都带 `tools` schema；本地工具跑完后下一轮 `/v1/responses` 已含 `function_call_output`。这两类都继续 hold。TUI 工具不会被换号重放。
 
 空的 `response.completed` / `[DONE]`（0 token）立刻 `upstream_stream_empty`，换号冷却，不再空等到 idle timeout 才给客户端 HTTP 200。abort trailer 发 `response.failed` 且必填 `model`；`output_text.annotations` 缺省补 `[]`。TUI 0.2.93 把任何 `response.incomplete` 当成 fatal `max_tokens_truncation`。
 
-第一次缺思考把账号冷却 24 小时（`accountCooldown`，账号仍启用）。冷却过后再缺思考立刻禁用。空流惩罚走独立的 `idleAccountCooldown`。`POST /api/admin/v1/accounts/:id/clear-cooldown` 人工解开。成功有推理不会清第一次记录。降智账号页把这些换号记为 `missing_thinking`。
+第一次缺思考把账号冷却 12 小时（`accountCooldown`，账号仍启用）。冷却过后再缺思考立刻禁用。空流惩罚走独立的 `idleAccountCooldown`（默认 15m）。`POST /api/admin/v1/accounts/:id/clear-cooldown` 人工解开。成功有推理不会清第一次记录。降智账号页把这些换号记为 `missing_thinking`。
 
-开关：`qualityGuard.requestRetry`，默认 `enabled: false`。不处理图/视频、compaction（`skipQualityHold`）、stored response 钉账号、ForcedEgress 探针、`reasoning none`。
+开关：`qualityGuard.requestRetry`。fork 默认 `enabled: true`；官方 [#1013](https://github.com/chenyme/grok2api/pull/1013) 同参数但默认 `false`。不处理图/视频、compaction（`skipQualityHold`）、stored response 钉账号、ForcedEgress 探针、`reasoning none`。hosted 工具不重放。不要把 holdTimeout 改回 3s。
 
 Grok TUI 压缩是普通 `/v1/responses`，最后一条 user 是 grok-build 的 summary prompt，**没有** `compaction_trigger`。这条必须标成 `operation=compaction` 并跳过 hold，不能按缺思考换号。不要给 TUI 压缩补 trigger，否则 adapter 会改写成 Codex 加密 blob。历史里出现过这段 prompt、最后一条是普通对话，不当压缩。
 

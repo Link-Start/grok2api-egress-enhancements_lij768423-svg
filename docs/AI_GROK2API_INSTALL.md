@@ -1,10 +1,12 @@
 # 丢家宽给 AI：装成 Grok2API lab 同款
 
-**主路径是 Grok2API + Quality Guard sidecar。不要装 CPA，不要只开一个节点。**
+**主路径是 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) + Quality Guard sidecar。不要装 CPA，不要只开一个节点，不要 pull 官方 latest 镜像。**
 
-用户只需要把全部家宽 sticky 丢给你。你负责：拆 session → Mihomo 每条一个 listener → Grok2API 每条一个 `fixed` 节点 → 打开 Guard（lab 默认）。
+用户只需要把全部家宽 sticky 丢给你。你负责：拆 session → Mihomo 每条一个 listener → Grok2API 每条一个 `fixed` 节点 → 打开 Guard。
 
-别人装完要接近我们现网：多出口、被动守护、坏了能摘流。不是「插件亮了、表里一行 res-01」。
+可运行树是 **fork**，不是本仓补丁、也不是 `ghcr.io/chenyme/grok2api:latest`。fork 开箱即用：官方最新 + **缺思考 / 假加密思考拦截默认开**。`docker compose up -d --build` 会带 sidecar。
+
+本文与 fork 内 [AI_GROK2API_INSTALL.md](https://github.com/lij768423-svg/grok2api/blob/main/AI_GROK2API_INSTALL.md) 同步。拿到 fork 即可直接用；家宽脚本在 fork `scripts/from_residential.py`，本仓也保留一份。
 
 ---
 
@@ -12,15 +14,24 @@
 
 ```text
 按这个文档装，不要发挥：
-https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_GROK2API_INSTALL.md
+https://github.com/lij768423-svg/grok2api/blob/main/AI_GROK2API_INSTALL.md
 
-主路径：lij768423-svg/grok2api + Quality Guard sidecar。
-不要装 CLIProxyAPI / CPA 插件。
-家宽全部用上：每个 sticky session 一个 Mihomo listener + 一个 Grok2API 节点。
-禁止把多条合成一个「住宅池」。禁止只开 1 个节点交差。
+主路径：lij768423-svg/grok2api（fork）+ Quality Guard sidecar。不要装 CPA。
+不要 pull ghcr.io/chenyme/grok2api:latest，必须 clone 本 fork 再 docker compose up -d --build。
 
-机器：Linux，Docker 可用，装到 ~/grok-stack（新目录，别覆盖现网）。
-家宽（一行一条，格式随意）：
+这个 fork 开箱即用：官方最新 + 缺思考拦截默认开。
+- hold 30s / minOutput 8 / 6 枪 / fail_closed
+- 短 encrypted_content stub 不算思考；floor = max(256B, reasoning_tokens×4)
+- hold 到期后的短问候 + 高 reasoning（「你好」）继续扣
+- 缺思考冷却 12h，空流 15m；docker compose up -d 带 sidecar
+
+家宽全部用上，每个 sticky 一个 Mihomo listener + 一个 Grok2API 节点。
+禁止只开 1 个交差。禁止把多条合成一个「住宅池」。
+
+机器：Linux + Docker，装到 ~/grok-stack（新目录，别覆盖现网）。
+有邮箱再一起装注册机；没有也行，先把出口和 Guard 拉起来。
+
+家宽（一行一条，URL / host:port:user:pass / 带 sid 都行）：
 
 ```
 
@@ -30,10 +41,11 @@ https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_
 
 ## 1. 你先读什么
 
-1. 本文（落地顺序）
-2. 可运行 fork：https://github.com/lij768423-svg/grok2api
-3. sidecar：本仓 `sidecar/QUALITY_GUARD.md`
-4. 家宽脚本：本仓 `scripts/from_residential.py`
+1. 本文或 fork 同名文档（落地顺序）
+2. fork：https://github.com/lij768423-svg/grok2api
+3. fork `config.example.yaml`（`requestRetry` 已开）
+4. sidecar：本仓 `sidecar/QUALITY_GUARD.md` 或 fork `tools/egress-quality-guard/README.zh-CN.md`
+5. 家宽脚本：fork 或本仓 `scripts/from_residential.py`
 
 不要走 `cpa-plugin/`。那是旁路，不是交付。
 
@@ -62,7 +74,7 @@ HOST:PORT:USER:PASS
 http://ACCOUNT-region-US-sid-XXXX-t-10:PASS@HOST:PORT
 ```
 
-**同一 host:port、不同 username / sid = 不同 session = 不同节点。**  
+**同一 host:port、不同 username / sid = 不同 session = 不同节点。**
 用户写「我买了 8 条」但只贴 1 条 URL：停下来让他把 sid 列表或 8 行都贴全。不准自行复制成 8 个假节点。
 
 聊天里解析完只回：名称、listener 端口、出口 IP。不要回显完整代理 URL / 密码。
@@ -72,12 +84,13 @@ http://ACCOUNT-region-US-sid-XXXX-t-10:PASS@HOST:PORT
 ## 3. 硬性规则（违反 = 没装完）
 
 1. 用户贴了 N 条家宽，交付必须有 **N 个独立 listener + N 个 Grok2API 节点**。
-2. 使用侧节点数 **&lt; 3** 只能叫冒烟，汇报里必须写「不像 lab」。
+2. 使用侧节点数 **< 3** 只能叫冒烟，汇报里必须写「不像 lab」。
 3. 使用侧 **≥ 3** 才允许说接近 lab：Guard `passive` + `failClosed: true` + `softTPS: 200`。
 4. 禁止：只加 `res-01`、把 8 条 sticky 合成一个节点、`proxyPool=true` 套在 sticky 上、阶段 A 停住交差。
 5. 禁止：Grok2API 在 bridge 网络里填 `http://127.0.0.1:端口`（那是容器自己）。用 `network_mode: host`，或 `host.docker.internal` / 宿主机网关。
 6. 注册口和使用口不要抢同一条 sticky。脚本会在 N≥4 时自动拆。
 7. 不要把 CPA `.so`、8317、商店插件写进交付说明。
+8. 不要 `docker pull ghcr.io/chenyme/grok2api:latest`。官方镜像 **默认不拦截**，也没有密文 floor / burst。必须 clone fork 再 `--build`。
 
 ---
 
@@ -93,10 +106,10 @@ mkdir -p ~/grok-stack/egress-gen
 # 用户家宽 → ~/grok-stack/residential.dump   chmod 600
 
 git clone --depth 1 \
-  https://github.com/lij768423-svg/grok2api-egress-enhancements.git \
-  ~/grok-stack/grok2api-egress-enhancements
+  https://github.com/lij768423-svg/grok2api.git \
+  ~/grok-stack/grok2api
 
-python3 ~/grok-stack/grok2api-egress-enhancements/scripts/from_residential.py \
+python3 ~/grok-stack/grok2api/scripts/from_residential.py \
   ~/grok-stack/residential.dump \
   --out-dir ~/grok-stack/egress-gen
 ```
@@ -118,52 +131,48 @@ curl -s --max-time 20 --proxy http://127.0.0.1:8301 https://api.ipify.org
 ### C. 起 Grok2API + Guard
 
 ```bash
-git clone --depth 1 https://github.com/lij768423-svg/grok2api.git ~/grok-stack/grok2api
 cd ~/grok-stack/grok2api
-cp config.example.yaml config.yaml
+./scripts/bootstrap-lab-config.sh
+# 或：cp config.example.yaml config.yaml 后自己填 secrets / bootstrapAdmin
 ```
 
-这个 fork 的 `main` 已经叠了官方 v3.1.4 + TUI hold/serde 六个补丁（#977–#981、#984）。  
-**必须 `--build` 本仓库镜像。** `pull ghcr.io/chenyme/grok2api:latest` 还是裸 v3.1.4：TUI 会把 tools schema 当 skip、假 `reasoning_tokens` 当 thinking、空流空等到 idle、abort 缺 `model` 直接 serde 炸。
-
-`config.yaml`：
-
-- `secrets.jwtSecret` / `credentialEncryptionKey` 用 openssl 生成，不回显
-- `bootstrapAdmin.password` 写入 `admin-password.txt`（0600）
-- 打开 Quality Guard，按 `egress-gen/guard.json` 填：
+fork 的 `config.example.yaml` 已经是 lab 默认，**不要改回官方的 `requestRetry.enabled: false` / `minOutputTokens: 32`**。核对：
 
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.5"
+  model: "grok-4.6"
   mode: passive
-  activeInterval: 30m
-  passivePollInterval: 5s
-  softTPS: 200          # 使用侧 <3 时用 500
-  hardTPS: 1000
-  consecutiveSoft: 2
-  consecutiveErrors: 2
-  quarantineDuration: 30s
-  noAccountBackoff: 5m
-  minimumHealthyNodes: 2   # 脚本 guard.json 为准；≥4 用 3
-  maxOutputTokens: 384
-  failClosed: true         # 使用侧 <3 时 false
-  minimumGenerationWindow: 1s
   requestRetry:
     enabled: true
     maxAttempts: 6
     holdTimeout: 30s
-    minOutputTokens: 32
+    minOutputTokens: 8
     onExhausted: fail_closed
     accountCooldown: 12h
-    idleAccountCooldown: 12h
+    idleAccountCooldown: 15m
+    minEncryptedBytes: 256
+    encryptedBytesPerReasoningToken: 4
 ```
 
-Compose（编本地 fork，不要 pull 官方 latest）：
+使用侧 ≥3 时，把 Guard 调到接近 lab（拦截参数保持上面这组）：
+
+```yaml
+qualityGuard:
+  softTPS: 200
+  failClosed: true
+  minimumHealthyNodes: 2   # 脚本 guard.json 为准；≥4 用 3
+```
+
+使用侧 <3 时：`failClosed: false`、`softTPS: 500`，汇报写「不像 lab」。
+
+Compose（编 fork，不要 pull 官方 latest）：
 
 ```bash
-docker compose --profile quality-guard up -d --build
+docker compose up -d --build
 ```
+
+fork **不用** `--profile quality-guard`：sidecar 默认就起。
 
 sidecar 环境（lab 同款，第一天 Rank 先 dry-run）：
 
@@ -217,7 +226,8 @@ python3 ~/grok-fullchain/deploy/import_to_grok2api.py \
 - [ ] Grok2API 管理端能登录
 - [ ] `/quality-guard` 打得开
 - [ ] 使用侧节点数 = 使用侧 listener 数，且 `proxyPool=false`
-- [ ] 使用侧 ≥3 时：`failClosed=true`、`softTPS=200`、profile `quality-guard` 在跑
+- [ ] 使用侧 ≥3 时：`failClosed=true`、`softTPS=200`、sidecar 在跑
+- [ ] `requestRetry.enabled=true`、`holdTimeout=30s`、`minOutputTokens=8`、`minEncryptedBytes=256`
 - [ ] 没有安装 CPA 插件，交付说明里没有 8317
 - [ ] 聊天里没有完整代理 URL / admin 密码 / token
 
@@ -235,6 +245,7 @@ python3 ~/grok-fullchain/deploy/import_to_grok2api.py \
 | --- | --- |
 | Grok2API | URL（常见 `:8000` / `:8181`） |
 | Guard | `/quality-guard`；mode / failClosed / softTPS |
+| 拦截 | requestRetry 开；hold 30s；floor 256B / ×4；burst 开 |
 | 家宽 | 用户贴了 N 条 → 使用侧 x 个 + 注册侧 y 个 |
 | 出口 IP | 端口 → IP；标出重复 IP |
 | 像不像 lab | 使用侧 ≥3 且 Guard 已按本文打开 = 接近；否则写原因 |
@@ -245,8 +256,12 @@ python3 ~/grok-fullchain/deploy/import_to_grok2api.py \
 
 ## 7. 不要做
 
+- 不要把官方 `chenyme/grok2api` 当可运行交付：官方 PR 同参数但 **默认不启动拦截**
 - 不要把 `RECOMMENDED_DEPLOYMENT` 的「阶段 A：只接一条」当成交付
 - 不要问「1024 还是 Kookeey」当分类；问三次 IP 是否相同、yaml 里 `server:` 是什么
 - 不要改用户已经在跑的 Grok2API / Mihomo
 - 不要把供应商账密写进 grok2api 节点（只写 Mihomo listener）
 - 不要在 Issue / 截图 / 聊天回显 `residential.dump` 或 `mihomo.yaml` 里的 username/password
+- 不要把 `encrypted_content != ""` 或 `usage.reasoning_tokens` 当成思考证据
+- 不要把 holdTimeout 改回 3s（会把 grok-4.6 流末尾密文误判成缺思考）
+- 不要再 `git am` 0015–0020 到官方最新：那些已经在上游；live 增量是密文 floor + burst（[chenyme#1013](https://github.com/chenyme/grok2api/pull/1013)），fork 默认开

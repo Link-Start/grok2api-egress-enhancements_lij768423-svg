@@ -4,13 +4,21 @@
 
 ## One-shot install prompt
 
-Paste this to your AI, then append every residential sticky:
+Paste this to your AI, then append every residential sticky. The same block lives in the [fork README](https://github.com/lij768423-svg/grok2api).
 
 ```text
 Follow this doc exactly:
-https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_GROK2API_INSTALL.md
+https://github.com/lij768423-svg/grok2api/blob/main/AI_GROK2API_INSTALL.md
 
-Primary path: lij768423-svg/grok2api + Quality Guard sidecar. Do not install CPA.
+Primary path: lij768423-svg/grok2api (fork) + Quality Guard sidecar. Do not install CPA.
+Do not pull ghcr.io/chenyme/grok2api:latest. Clone this fork and docker compose up -d --build.
+
+This fork is out of the box: official latest + missing-thinking intercept ON.
+- hold 30s / minOutput 8 / 6 attempts / fail_closed
+- short encrypted_content stubs are not thinking; floor = max(256B, reasoning_tokens×4)
+- hold-expired short greeting + high reasoning still withheld
+- 12h missing-thinking cooldown, 15m idle; compose up -d starts the sidecar
+
 Use every residential sticky: one Mihomo listener + one Grok2API node per session.
 A single res-01 node, or merging many stickies into one pool, is not done.
 
@@ -27,26 +35,27 @@ This is an unofficial enhancement distribution for [chenyme/grok2api](https://gi
 
 Current baseline:
 
-- Upstream release: `v3.1.4` / `909bb810` (0006–0014 / #956–#959 #966–#968 are already upstream)
-- Today's delta: TUI hold evidence + serde required fields + empty-stream retry (`patches/0015-*.patch` … `0020-*.patch`, PRs #977–#981 #984)
-- Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`
+- Upstream: latest official (0015–0020 / #977–#981 #984 already merged)
+- Today's delta: ciphertext floor + burst withhold ([#1013](https://github.com/chenyme/grok2api/pull/1013); official ships `enabled: false`)
+- Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main` — same params, **intercept ON**
 
 If you are still on `v3.0.11`, keep using the legacy patch `patches/0001-feat-add-egress-recovery-and-quality-guard.patch` (closed [#837](https://github.com/chenyme/grok2api/pull/837)).
 
 ## Features
 
-### Request-path missing-thinking hold (v3.1.4+)
+### Request-path missing-thinking hold (live: cipher floor + burst)
 
-- Buffer thinking-model SSE until **streamed** thinking appears (reasoning/summary deltas or `encrypted_content`). `usage.reasoning_tokens`, empty reasoning items, and the Chat SSE stub do **not** count.
-- Missing thinking (`output ≥ 32`, no streamed thinking) is **not delivered**. Another account is tried.
-- Grok TUI always sends a `tools` schema, and the next turn after local tools already contains `function_call_output`. Both still hold.
-- Empty `response.completed` / `[DONE]` fails immediately as `upstream_stream_empty` instead of waiting for idle under HTTP 200.
-- Abort trailers emit `response.failed` with required `model`; `output_text.annotations` is filled as `[]`. TUI 0.2.93 treats `response.incomplete` as fatal truncation.
-- Up to 6 attempts (first + 5 switches). All misses → `503 quality_degraded`.
-- First miss: 24h scheduling cooldown (`accountCooldown`). A later miss after that cooldown disables the account.
-- Empty-stream penalty is `idleAccountCooldown`; `POST /api/admin/v1/accounts/:id/clear-cooldown` clears it.
-- Grok TUI compaction still sets `skipQualityHold`. Do not inject `compaction_trigger`.
-- Off by default: `qualityGuard.requestRetry.enabled: false`.
+- Buffer thinking-model SSE until **streamed** thinking appears (reasoning/summary deltas, or `encrypted_content` / Anthropic signature meeting the ciphertext floor).
+- A short stub is not thinking. `gAAAA-cipher`, empty reasoning items, the Chat SSE stub, and `usage.reasoning_tokens` alone do **not** count. Floor = `max(minEncryptedBytes, reasoning_tokens × encryptedBytesPerReasoningToken)` (256B / 4).
+- After the hold deadline, a short greeting billed as heavy thinking is still withheld (`HoldExpired` is kept on scan state).
+- A barely-over-floor flush in under a second is also withheld.
+- Missing thinking (`output ≥ minOutputTokens`, default **8**, no streamed thinking) is **not delivered**.
+- Grok TUI tools schema / after-tool turns still hold. Hosted tools are not replayed.
+- Empty `response.completed` / `[DONE]` fails immediately as `upstream_stream_empty`.
+- Abort trailers emit `response.failed` with required `model`.
+- Up to 6 attempts. All misses → `503 quality_degraded`.
+- First miss: 12h `accountCooldown`. Empty-stream penalty: 15m `idleAccountCooldown`.
+- **Fork default ON.** Official [#1013](https://github.com/chenyme/grok2api/pull/1013) ships the same numbers with `enabled: false`.
 
 ### Immediate fixed-proxy recovery
 

@@ -7,15 +7,23 @@ CPA 插件在 `cpa-plugin/`，不是默认交付。
 
 ## 一键安装提示词
 
-整段复制发给你的 AI，只改最后的家宽：
+整段复制发给你的 AI，只改最后的家宽。拿到 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) 也能用同一段（fork README 里有副本）。
 
 ```text
 按这个文档装，不要发挥：
-https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_GROK2API_INSTALL.md
+https://github.com/lij768423-svg/grok2api/blob/main/AI_GROK2API_INSTALL.md
 
-主路径：lij768423-svg/grok2api + Quality Guard sidecar。不要装 CPA。
-家宽全部用上，每个 sticky 一个节点。禁止只开 1 个交差。
-只贴 1 条、或把多条合成一个「住宅池」，都算没装完。
+主路径：lij768423-svg/grok2api（fork）+ Quality Guard sidecar。不要装 CPA。
+不要 pull ghcr.io/chenyme/grok2api:latest，必须 clone 本 fork 再 docker compose up -d --build。
+
+这个 fork 开箱即用：官方最新 + 缺思考拦截默认开。
+- hold 30s / minOutput 8 / 6 枪 / fail_closed
+- 短 encrypted_content stub 不算思考；floor = max(256B, reasoning_tokens×4)
+- hold 到期后的短问候 + 高 reasoning（「你好」）继续扣
+- 缺思考冷却 12h，空流 15m；docker compose up -d 带 sidecar
+
+家宽全部用上，每个 sticky 一个 Mihomo listener + 一个 Grok2API 节点。
+禁止只开 1 个交差。禁止把多条合成一个「住宅池」。
 
 机器：Linux + Docker，装到 ~/grok-stack（新目录，别覆盖现网）。
 有邮箱再一起装注册机；没有也行，先把出口和 Guard 拉起来。
@@ -24,23 +32,20 @@ https://github.com/lij768423-svg/grok2api-egress-enhancements/blob/main/docs/AI_
 
 ```
 
-AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽拆成 Mihomo listener + Grok2API 节点，再按 lab 默认打开 Guard。完整步骤：[docs/AI_GROK2API_INSTALL.md](./docs/AI_GROK2API_INSTALL.md)。
+AI 用 fork（或本仓）[`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽拆成 Mihomo listener + Grok2API 节点。完整步骤：[docs/AI_GROK2API_INSTALL.md](./docs/AI_GROK2API_INSTALL.md)。
 
 这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，以及当前生产在跑的 **Quality Guard sidecar**（管理页 `/quality-guard`）。仓库不复制上游完整源码。
 
-当前基线是官方 `v3.1.4` / `909bb810`（0006–0014 / #956–#959 #966–#968 已合进官方）。**live 补丁是 TUI hold + serde，可运行树是 fork：**
+当前基线是官方最新（0015–0020 / #977–#981 #984 已合进上游）。**live 增量是假加密思考拦截，可运行树是 fork：**
 
-| 能力 | 本仓代码 | 上游 PR | 别人怎么用到 |
-| --- | --- | --- | --- |
-| 只有流式 thinking 才算 hold 证据 | `patches/0015-*.patch` | [#977](https://github.com/chenyme/grok2api/pull/977) | clone **fork** 再 `--build` |
-| 补 `output_text.annotations` | `patches/0016-*.patch` | [#978](https://github.com/chenyme/grok2api/pull/978) | 同上 |
-| TUI tools schema / 工具后一轮也 hold | `patches/0017-*.patch` | [#979](https://github.com/chenyme/grok2api/pull/979) | 同上 |
-| 空 `completed` 立刻失败换号 | `patches/0018-*.patch` | [#980](https://github.com/chenyme/grok2api/pull/980) | 同上 |
-| 清冷却 + `idleAccountCooldown` | `patches/0019-*.patch` | [#981](https://github.com/chenyme/grok2api/pull/981) | 同上 |
-| abort 改 `response.failed` + 必填 `model` | `patches/0020-*.patch` | [#984](https://github.com/chenyme/grok2api/pull/984) | 同上 |
+| 能力 | 上游 | 别人怎么用到 |
+| --- | --- | --- |
+| 流式 thinking 才算 hold 证据；tools 也 hold；空 completed 立刻换号 | 已在官方 | clone **fork** 再 `--build` |
+| 密文 floor + burst + hold 过期仍记着 | [#1013](https://github.com/chenyme/grok2api/pull/1013)（官方默认 **关**） | **fork 默认开** |
+| 补 `output_text.annotations` / abort `response.failed` | 已在官方 | 同上 |
 
-这些都是 **Grok2API 网关** 代码，不是 CPA 插件。插件 `.so` 没有这六项。  
-0015 / 0017 / 0018 都改 `quality_retry*`，按编号 `git am`。直接用 [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`。不要把 0006–0014 再打到 v3.1.4 上。
+官方 PR 推荐参数和 fork 一样（hold 30s / minOutput 8 / floor 256B / ×4），但 `requestRetry.enabled` 默认 `false`。fork 全量复刻并默认启用拦截。  
+仍停在干净 `v3.1.4` 时才需要本仓 `patches/0015-*.patch` … `0020-*.patch`。不要把 0006–0014 再打到 v3.1.4 上。
 
 仍停在 `v3.0.11` 时，继续使用遗留补丁 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`（对应已关闭的 [#837](https://github.com/chenyme/grok2api/pull/837)）。
 
@@ -77,19 +82,21 @@ AI 用 [`scripts/from_residential.py`](./scripts/from_residential.py) 把家宽�
 - `QUALITY_GUARD_NODE_IDS` 留空时自动发现所有已启用的代理 Build 节点；状态文件同时发布已解析节点，兼容旧版管理页面。
 - 独立 Python sidecar、Docker Compose、systemd、安全说明和中英文文档。
 
-### 请求路径缺 thinking 拦截（v3.1.4+ 增量）
+### 请求路径缺 thinking 拦截（live：密文 floor + burst）
 
-- 思考模型流式请求在写出给用户前先扣住。只有真正流式 thinking（reasoning/summary delta、`encrypted_content`）才放行；`usage.reasoning_tokens`、空 reasoning item、Chat SSE stub **不算**。
-- 可见输出 ≥ 32 且无流式 thinking 记为降智，**不发给用户**，换账号再打。
-- Grok TUI 每轮都带 `tools` schema，工具跑完下一轮已有 `function_call_output`：这两类都 **继续 hold**（TUI 工具本地执行，换号只重放模型回合）。
+- 思考模型流式请求在写出给用户前先扣住。只有真正流式 thinking（reasoning/summary delta，或 `encrypted_content` / Anthropic signature **达到密文 floor**）才放行。
+- **短 stub 不算思考。** `gAAAA-cipher`、空 reasoning item、Chat SSE stub、`usage.reasoning_tokens` 单独出现都不是证据。floor = `max(minEncryptedBytes, reasoning_tokens × encryptedBytesPerReasoningToken)`，默认 256B / 4。
+- hold 到期后仍空着，后面才倒出来的短问候 + 高 reasoning（TUI「你好」）继续扣：`HoldExpired` 写在 scan state 上，不会在定时器那一拍丢掉。
+- 刚过 floor 又在 1s 内刷可见输出（barely-over-floor flush）也扣。
+- 可见输出 ≥ `minOutputTokens`（fork / 推荐值 **8**）且无流式 thinking 记为降智，**不发给用户**，换账号再打。
+- Grok TUI 每轮都带 `tools` schema，工具跑完下一轮已有 `function_call_output`：这两类都 **继续 hold**（TUI 工具本地执行，换号只重放模型回合）。hosted 工具（web_search / MCP 等）不重放。
 - 空的 `response.completed` / `[DONE]` 立刻 `upstream_stream_empty` 换号，不再空等到 idle 才给 HTTP 200。
-- abort trailer 发 `response.failed`（带必填 `model`），并补 `output_text.annotations: []`。TUI 0.2.93 把 `response.incomplete` 当成不可重试的 truncation。
-- 最多 6 枪（首次 + 换号 5 次）。全部仍无推理则 `503 quality_degraded`，不再 `deliver_last`。
-- 第一次缺思考：账号冷却 24h（`accountCooldown`），仍启用。24h 后再缺思考：立刻禁用。
-- 空流惩罚可配 `idleAccountCooldown`；`POST /api/admin/v1/accounts/:id/clear-cooldown` 人工解开。
-- TUI 压缩（普通 `/v1/responses` summary prompt）仍 `skipQualityHold`，不重开 #974。
-- 默认关闭：`qualityGuard.requestRetry.enabled: false`。
-- 审计：`error_code=quality_degraded`。网关日志：`quality_degraded_retry` / `quality_peek_empty_retry`。
+- abort trailer 发 `response.failed`（带必填 `model`），并补 `output_text.annotations: []`。
+- 最多 6 枪。全部仍无推理则 `503 quality_degraded`。
+- 第一次缺思考：账号冷却 12h（`accountCooldown`）。冷却后再缺思考：立刻禁用。空流惩罚 `idleAccountCooldown` 默认 15m。
+- TUI 压缩仍 `skipQualityHold`。不要把 holdTimeout 改回 3s。
+- **fork 默认开** `requestRetry.enabled: true`。官方 [#1013](https://github.com/chenyme/grok2api/pull/1013) 同参数但默认 `false`。
+- 审计：`error_code=quality_degraded`。
 
 ### 探针方案（v3.1.2+ 增量）
 
@@ -131,7 +138,7 @@ git am --3way /path/to/grok2api-egress-enhancements/patches/0019-fix-clear-accou
 git am --3way /path/to/grok2api-egress-enhancements/patches/0020-fix-responses-abort-failed-model.patch
 ```
 
-更省事：直接 clone [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main`。不要把 0006–0014 再 `git am` 到 v3.1.4 上，那些已经在官方里。
+更省事：直接 clone [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api) `main` 再 `--build`。不要 pull 官方 latest。0015–0020 已在官方最新里，不要再 `git am`。live 拦截在 fork 默认开、官方 PR 默认关。
 
 仍基于 `v3.0.11` 时改用 `patches/0001-feat-add-egress-recovery-and-quality-guard.patch`。目标版本高于补丁基线时，使用 [AI 合并指南](./docs/AI_MERGE_GUIDE.md)，按功能不变量解决冲突，不要整文件覆盖新版实现。
 

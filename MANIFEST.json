@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "upstream_repository": "https://github.com/chenyme/grok2api",
-  "upstream_tag": "v3.1.4",
-  "upstream_commit": "909bb8109fcc",
+  "upstream_tag": "latest (0015-0020 already upstream)",
+  "upstream_commit": "62d2775c+",
   "runnable_fork": "https://github.com/lij768423-svg/grok2api",
-  "runnable_note": "Fork main = official v3.1.4 + #977 #978 #979 #980 #981 #984. Clone the fork and docker compose --build. Do not pull ghcr.io/chenyme/grok2api:latest.",
+  "runnable_note": "Fork = official latest + ciphertext floor/burst (#1013) with requestRetry.enabled true. Clone the fork and docker compose up -d --build. Do not pull ghcr.io/chenyme/grok2api:latest. Official #1013 ships the same numbers with enabled false.",
   "patches": [
     {
       "id": "0015",

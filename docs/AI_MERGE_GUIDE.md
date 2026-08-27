@@ -50,7 +50,8 @@ live 补丁（abort response.failed + model）：patches/0020-fix-responses-abor
 18. GET /api/admin/v1/request-audits/degrade-accounts 必须走管理员鉴权。批量禁/解禁必须复用现有账号 batch API，ids 为字符串数组。
 19. 不得读取或修改真实 .env、config.yaml、数据库、状态卷或生产代理配置。
 20. 完成后运行 Go 全量测试、质量守护与轮换器单测、前端 lint/build，并列出所有语义冲突和处理方式。
-21. ClassifyQualityHold 只能把流式 reasoning/summary delta 或 `encrypted_content` 当 thinking。`usage.reasoning_tokens`、空 reasoning item、Chat stub 必须继续 withhold。
+21. ClassifyQualityHold 只能把流式 reasoning/summary delta，或达到密文 floor 的 `encrypted_content` / Anthropic signature 当 thinking。短 stub、`usage.reasoning_tokens`、空 reasoning item、Chat stub 必须继续 withhold。hold 到期后的短问候 + 高 reasoning 必须继续扣（`HoldExpired` 写在 scan state）。
+26. 官方最新不要再 am 0015–0020。live 增量是密文 floor + burst（chenyme#1013，默认 enabled false）。fork 同参数默认 enabled true。
 22. `tools` / `functions` schema 以及 `function_call_output` / `tool_result` / `role=tool` 都不得 skip hold。TUI 工具是本地执行的。
 23. `response.completed` / `[DONE]` 且 0 token 必须立刻 `errQualityEmptyStream`，不得再等到 idle timeout 才给 HTTP 200。
 24. Responses abort trailer 必须是 `response.failed`（不是 `incomplete`），且 `response.model` 必填；`output_text.annotations` 缺省为 `[]`。
